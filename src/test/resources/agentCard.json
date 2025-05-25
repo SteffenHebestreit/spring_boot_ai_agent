@@ -1,0 +1,47 @@
+{
+  "id": "test-props-id",
+  "name": "Test Props Name",
+  "description": "Test Props Description",
+  "url": "http://test-props-url.com",
+  "provider": {
+    "organization": "Test Props Org",
+    "url": "http://test-props-provider-url.com"
+  },
+  "contact_email": "test-props-contact@example.com",
+  "version": "1.0.0",
+  "authentication": {
+    "type": "oauth2",
+    "description": "OAuth 2.0 authentication is required to use this agent"
+  },
+  "documentationUrl": "https://example.com/research-agent/docs",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain", "application/json"],
+  "defaultOutputModes": ["text/plain", "application/json"],
+  "skills": [
+    {
+      "id": "information-retrieval",
+      "name": "Information Retrieval",
+      "description": "Searches and retrieves relevant information from various sources based on user queries.",
+      "tags": ["research", "search", "information", "retrieval"],
+      "examples": [
+        "Find information about machine learning techniques",
+        "Retrieve recent papers on climate change"
+      ]
+    },
+    {
+      "id": "summarization",
+      "name": "Content Summarization",
+      "description": "Summarizes articles, papers, and other text content into concise formats.",
+      "tags": ["summarization", "research", "content analysis"],
+      "examples": [
+        "Summarize this research paper",
+        "Give me a brief overview of this article"
+      ]
+    }
+  ],
+  "supportsAuthenticatedExtendedCard": false
+}
