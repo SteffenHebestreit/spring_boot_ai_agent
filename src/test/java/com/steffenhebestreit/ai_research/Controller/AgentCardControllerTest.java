@@ -5,7 +5,8 @@ import com.steffenhebestreit.ai_research.Service.DynamicIntegrationService;
 import com.steffenhebestreit.ai_research.Configuration.IntegrationProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.context.annotation.Import;
 import com.steffenhebestreit.ai_research.Configuration.SecurityConfig;
@@ -35,9 +36,10 @@ import org.mockito.Mockito;
 /**
  * Tests for the AgentCardController to ensure it serves the agent card correctly.
  */
-@WebMvcTest(controllers = {AgentCardController.class})
-@Import({SecurityConfig.class, AgentCardControllerTest.AgentCardControllerTestConfiguration.class})
+@SpringBootTest
+@AutoConfigureMockMvc
 @ActiveProfiles("test")
+@Import({SecurityConfig.class, AgentCardControllerTest.AgentCardControllerTestConfiguration.class})
 class AgentCardControllerTest {
 
     @TestConfiguration

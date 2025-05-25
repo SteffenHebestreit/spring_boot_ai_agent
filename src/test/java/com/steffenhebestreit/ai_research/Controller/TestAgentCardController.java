@@ -12,8 +12,8 @@ import java.io.IOException;
  * Test-specific implementation of the AgentCardController
  * This controller returns a fixed agent card for testing
  */
-@RestController
-@Profile("test")
+// @RestController
+// @Profile("test")
 public class TestAgentCardController {
     
     /**

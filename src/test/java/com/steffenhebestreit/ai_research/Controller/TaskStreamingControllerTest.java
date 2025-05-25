@@ -6,12 +6,13 @@ import com.steffenhebestreit.ai_research.Service.TaskService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.HashMap;
@@ -24,23 +25,25 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 
+@SpringBootTest
+@AutoConfigureMockMvc
 @ActiveProfiles("test")
 class TaskStreamingControllerTest {
 
+    @Autowired
     private MockMvc mockMvc;
     
-    @Mock
+    @MockBean
     private TaskService taskService;
     
+    @Autowired
     private ObjectMapper objectMapper;
-    private TaskStreamingController controller;    @BeforeEach
+    
+    @Autowired
+    private TaskStreamingController controller;
+
+    @BeforeEach
     void setUp() {
-        MockitoAnnotations.openMocks(this);
-        objectMapper = new ObjectMapper();
-        objectMapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
-        objectMapper.disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        controller = new TaskStreamingController(taskService, objectMapper);
-        mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
     }
       @Test
     void resubscribe_WithValidTaskId_ShouldReturnEmitter() throws Exception {

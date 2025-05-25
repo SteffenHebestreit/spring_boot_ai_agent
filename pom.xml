@@ -5,7 +5,7 @@
 	<parent>
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
-		<version>3.4.6</version>
+		<version>3.2.5</version> <!-- Downgraded Spring Boot version -->
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
 	<groupId>com.steffenhebestreit</groupId>
@@ -13,7 +13,7 @@
 	<version>0.0.1-SNAPSHOT</version>
 	<name>AI Research Project</name>
 	<description>A Spring Boot project for AI research.</description>
-	<url>https://your-project-url.com</url>
+	<url>https://github.com/SteffenHebestreit/spring_boot_ai_agent</url>
 	<licenses>
 		<license>
 			<name>Specify License Here</name>
@@ -22,20 +22,20 @@
 	</licenses>
 	<developers>
 		<developer>
-			<name>Your Name</name>
-			<email>your.email@example.com</email>
+			<name>Steffen Hebestreit</name>
+			<email>info@steffen-hebestreit.com</email>
 			<organization>Your Organization</organization>
 			<organizationUrl>Your Organization URL</organizationUrl>
 		</developer>
 	</developers>
 	<scm>
-		<connection>scm:git:git://github.com/your-username/your-repo.git</connection>
-		<developerConnection>scm:git:ssh://github.com:your-username/your-repo.git</developerConnection>
+		<connection>scm:git:git://github.com/SteffenHebestreit/spring_boot_ai_agent.git</connection>
+		<developerConnection>scm:git:ssh://github.com:SteffenHebestreit/spring_boot_ai_agent.git</developerConnection>
 		<tag>HEAD</tag>
-		<url>https://github.com/your-username/your-repo</url>
+		<url>https://github.com/SteffenHebestreit/spring_boot_ai_agent</url>
 	</scm>
 	<properties>
-		<java.version>11</java.version>
+		<java.version>21</java.version>
 	</properties>
 	<dependencies>
 
@@ -43,10 +43,10 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security</artifactId>
 		</dependency>
-<!-- 		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
-		</dependency> -->
+<!--		<dependency>-->
+<!--			<groupId>org.springframework.boot</groupId>-->
+<!--			<artifactId>spring-boot-starter-oauth2-resource-server</artifactId>-->
+<!--		</dependency>-->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-web</artifactId>
@@ -92,13 +92,44 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webflux</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>org.mockito</groupId>
+			<artifactId>mockito-core</artifactId>
+			<version>5.2.0</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.mockito</groupId>
+			<artifactId>mockito-junit-jupiter</artifactId>
+			<version>5.2.0</version>
+			<scope>test</scope>
+		</dependency>
    </dependencies>
 
 	<build>
 		<plugins>
 			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<version>3.11.0</version>
+				<configuration>
+					<release>${java.version}</release>
+				</configuration>
+			</plugin>
+			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<version>3.0.0</version>
+				<configuration>
+				<systemPropertyVariables>
+					<spring.classformat.ignore>true</spring.classformat.ignore>
+				</systemPropertyVariables>
+				<argLine>-Dnet.bytebuddy.experimental=true</argLine>
+			</configuration>
 			</plugin>
 		</plugins>
 	</build>
