@@ -1,4 +1,4 @@
-# AI Research Project
+# AI Research Project (!!!UNDER DEVELOPMENT!!!)
 
 A Spring Boot project for AI research.
 
@@ -50,7 +50,7 @@ This project, "AI Research Project," is a Spring Boot application designed for A
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/your-repo.git # Replace with your actual repository URL
+    git clone https://github.com/SteffenHebestreit/spring_boot_ai_agent.git # Replace with your actual repository URL
     cd ai_research/backend
     ```
 
@@ -287,38 +287,3 @@ The security configuration is defined in `src/main/java/com/steffenhebestreit/ai
     -   **HTTPS should be enforced in production** to protect data in transit. This is typically handled at a reverse proxy/load balancer level or can be configured within Spring Boot.
     -   **Sensitive Information:** As highlighted in the Configuration section, API keys (like `OPENAI_API_KEY`) and other secrets (database passwords, etc.) **MUST NOT** be hardcoded in `application.properties` or committed to version control. Use environment variables, Spring Cloud Config, HashiCorp Vault, or other secure secret management solutions.
 
-## Contributing
-
-(This section should be updated with specific contribution guidelines for the project.)
-
-We welcome contributions! Please follow these general guidelines:
--   Check the issue tracker for existing bugs or feature requests.
--   Fork the repository and create a new branch for your changes.
--   Ensure your code adheres to the project's coding style (if defined).
--   Write unit tests for new features and bug fixes.
--   Ensure all tests pass (`mvn test`).
--   Submit a pull request with a clear description of your changes.
-
-Project SCM details (placeholders from `pom.xml` - update with actuals):
--   Connection: `scm:git:git://github.com/your-username/your-repo.git`
--   Developer Connection: `scm:git:ssh://github.com:your-username/your-repo.git`
--   URL: `https://github.com/your-username/your-repo`
-
-## License
-
-This project is licensed under the **Specify License Here**.
-Please see the `LICENSE` file (if one exists) or the license URL: License URL
-(Update with the actual license chosen for the project. This information is a placeholder from `pom.xml`.)
-
-## Contact
-
-For questions, issues, or contributions, please contact:
-
--   **Developer:** Your Name
--   **Email:** your.email@example.com
--   **Organization:** Your Organization
--   **Organization URL:** Your Organization URL
-
-(This information is based on placeholders in `pom.xml`. Please update with actual contact details.)
-
-Project URL (placeholder): https://your-project-url.com
