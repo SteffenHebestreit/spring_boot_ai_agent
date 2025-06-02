@@ -109,4 +109,55 @@ public class MessageTest {
         // Then
         assertEquals(timestamp, message.getTimestamp());
     }
+
+    @Test
+    void getContentAsString_WithStringContent_ShouldReturnString() {
+        // Given
+        String textContent = "This is text content";
+        Message message = new Message("user", "text/plain", textContent);
+        
+        // When
+        String result = message.getContentAsString();
+        
+        // Then
+        assertEquals(textContent, result);
+    }
+    
+    @Test
+    void getContentAsString_WithNonStringContent_ShouldReturnNull() {
+        // Given
+        // Create a multimodal content object (could be a list of content blocks)
+        Object multimodalContent = new HashMap<String, Object>() {{
+            put("text", "Here's an image");
+            put("imageUrl", "data:image/jpeg;base64,/9j/4AAQSkZJRgABA");
+        }};
+        Message message = new Message("user", "multipart/mixed", multimodalContent);
+        
+        // When
+        String result = message.getContentAsString();
+        
+        // Then
+        assertNull(result);
+    }
+    
+    @Test
+    void parameterizedConstructor_WithMultimodalContent_ShouldInitializeCorrectly() {
+        // Given
+        String role = "user";
+        String contentType = "multipart/mixed";
+        Object multimodalContent = new Object[] {
+            Map.of("type", "text", "text", "Check out this image:"),
+            Map.of("type", "image_url", "image_url", Map.of("url", "data:image/jpeg;base64,/9j/4AAQSkZJRg"))
+        };
+        
+        // When
+        Message message = new Message(role, contentType, multimodalContent);
+        
+        // Then
+        assertEquals(role, message.getRole());
+        assertEquals(contentType, message.getContentType());
+        assertEquals(multimodalContent, message.getContent());
+        assertNotNull(message.getMetadata());
+        assertNotNull(message.getTimestamp());
+    }
 }
