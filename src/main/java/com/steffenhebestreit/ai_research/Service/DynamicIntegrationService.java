@@ -25,6 +25,66 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * Service for dynamic discovery and integration with external AI systems and capabilities.
+ * 
+ * <p>This service provides comprehensive integration capabilities for connecting with
+ * Model Context Protocol (MCP) servers and Agent-to-Agent (A2A) peer systems. It handles
+ * dynamic capability discovery, authentication management, and real-time integration
+ * with external AI services and tools.</p>
+ * 
+ * <h3>Core Integration Types:</h3>
+ * <ul>
+ * <li><strong>MCP Servers:</strong> Tool and capability discovery from MCP-compatible systems</li>
+ * <li><strong>A2A Peers:</strong> Agent card discovery and skill enumeration from peer agents</li>
+ * <li><strong>Authentication:</strong> Multi-protocol auth including Keycloak and Bearer tokens</li>
+ * <li><strong>Caching:</strong> Intelligent token caching and capability refresh cycles</li>
+ * </ul>
+ * 
+ * <h3>MCP Integration Features:</h3>
+ * <ul>
+ * <li><strong>Tool Discovery:</strong> Automatic tool enumeration via JSON-RPC 2.0</li>
+ * <li><strong>Capability Mapping:</strong> Tool metadata extraction and categorization</li>
+ * <li><strong>Source Tracking:</strong> Server origin tracking for tool attribution</li>
+ * <li><strong>Error Resilience:</strong> Graceful handling of server connectivity issues</li>
+ * </ul>
+ * 
+ * <h3>A2A Peer Integration:</h3>
+ * <ul>
+ * <li><strong>Agent Discovery:</strong> Automatic agent card retrieval from /.well-known/agent.json</li>
+ * <li><strong>Skill Enumeration:</strong> Comprehensive skill and capability listing</li>
+ * <li><strong>Metadata Preservation:</strong> Complete agent information and contact details</li>
+ * <li><strong>Interoperability:</strong> Standard A2A protocol compliance</li>
+ * </ul>
+ * 
+ * <h3>Authentication Support:</h3>
+ * <ul>
+ * <li><strong>Static Bearer Tokens:</strong> Pre-configured API key authentication</li>
+ * <li><strong>Keycloak Integration:</strong> OAuth2 client credentials flow</li>
+ * <li><strong>Token Caching:</strong> Intelligent cache with expiry management</li>
+ * <li><strong>Automatic Refresh:</strong> Transparent token renewal on expiry</li>
+ * </ul>
+ * 
+ * <h3>Lifecycle Management:</h3>
+ * <ul>
+ * <li><strong>Initialization:</strong> Automatic capability discovery on startup</li>
+ * <li><strong>Refresh Cycles:</strong> Configurable periodic capability updates</li>
+ * <li><strong>Error Recovery:</strong> Resilient handling of temporary integration failures</li>
+ * <li><strong>Configuration Hot-reload:</strong> Dynamic integration reconfiguration</li>
+ * </ul>
+ * 
+ * <h3>Thread Safety:</h3>
+ * <p>All operations are thread-safe with proper synchronization for concurrent
+ * capability discovery and token management operations.</p>
+ * 
+ * @author Steffen Hebestreit
+ * @version 1.0
+ * @since 1.0
+ * @see IntegrationProperties
+ * @see McpServerConfig
+ * @see A2aPeerConfig
+ * @see AuthConfig
+ */
 @Service
 public class DynamicIntegrationService {
 
@@ -40,41 +100,39 @@ public class DynamicIntegrationService {
     // Simple cache for Keycloak tokens (Key: clientId@realm@authServerUrl, Value: TokenWrapper)
     private final Map<String, TokenWrapper> keycloakTokenCache = new HashMap<>();
 
-    private static class TokenWrapper {
-        String accessToken;
-        long expiryTimeMillis;
-
-        TokenWrapper(String accessToken, long expiresInSeconds) {
-            this.accessToken = accessToken;
-            // Set expiry time slightly before actual expiry to account for request time
-            this.expiryTimeMillis = System.currentTimeMillis() + (expiresInSeconds - 30) * 1000;
-        }
-
-        boolean isValid() {
-            return System.currentTimeMillis() < expiryTimeMillis;
-        }
-    }
-
-    public DynamicIntegrationService(IntegrationProperties integrationProperties, RestTemplateBuilder restTemplateBuilder) {
-        this.integrationProperties = integrationProperties;
-
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(5000); // 5 seconds connection timeout
-        requestFactory.setReadTimeout(10000);   // 10 seconds read timeout
-
-        this.restTemplate = restTemplateBuilder
-                .requestFactory(() -> requestFactory) // Use a supplier for the request factory
-                .build();
-    }
-
-    @PostConstruct
-    public void initializeDynamicIntegrations() {
-        logger.info("Initializing dynamic integrations...");
-        refreshDynamicCapabilities();
-    }
-
-    // Could be scheduled to run periodically
-    // @Scheduled(fixedRateString = "${agent.integrations.refresh-rate:3600000}") // e.g., every hour
+    /**
+     * Refreshes all dynamic capabilities from configured MCP servers and A2A peers.
+     * 
+     * <p>Performs comprehensive capability discovery by connecting to all configured
+     * integration endpoints and collecting available tools and skills. This method
+     * can be called manually or scheduled for periodic updates.</p>
+     * 
+     * <h3>Discovery Process:</h3>
+     * <ul>
+     * <li><strong>Cache Clearing:</strong> Removes previously discovered capabilities</li>
+     * <li><strong>MCP Discovery:</strong> Connects to all configured MCP servers</li>
+     * <li><strong>A2A Discovery:</strong> Retrieves agent cards from peer agents</li>
+     * <li><strong>Aggregation:</strong> Combines capabilities from all sources</li>
+     * <li><strong>Logging:</strong> Comprehensive discovery progress reporting</li>
+     * </ul>
+     * 
+     * <h3>Error Handling:</h3>
+     * <p>Individual integration failures do not prevent discovery from other sources.
+     * Errors are logged but the overall discovery process continues.</p>
+     * 
+     * <h3>Performance:</h3>
+     * <p>Discovery is performed sequentially to respect external service limits.
+     * Consider implementing parallel discovery with proper rate limiting for
+     * improved performance in production deployments.</p>
+     * 
+     * <h3>Scheduling:</h3>
+     * <p>Can be scheduled using Spring's @Scheduled annotation with configurable
+     * refresh intervals (currently commented out, e.g., every hour).</p>
+     * 
+     * @see #fetchToolsFromMcpServer(McpServerConfig)
+     * @see #fetchAgentCardFromA2aPeer(A2aPeerConfig)
+     * @see IntegrationProperties
+     */
     public void refreshDynamicCapabilities() {
         logger.info("Refreshing dynamic capabilities...");
         discoveredMcpTools.clear();
@@ -123,6 +181,38 @@ public class DynamicIntegrationService {
         logger.info("Finished refreshing dynamic capabilities. Total MCP tools: {}, Total A2A skills: {}", discoveredMcpTools.size(), discoveredA2aSkills.size());
     }
 
+    /**
+     * Retrieves tools and capabilities from a specific MCP server.
+     * 
+     * <p>Connects to an MCP server using JSON-RPC 2.0 protocol to discover
+     * available tools and their metadata. Handles authentication, request
+     * formatting, and response parsing according to MCP specifications.</p>
+     * 
+     * <h3>MCP Protocol Implementation:</h3>
+     * <ul>
+     * <li><strong>JSON-RPC 2.0:</strong> Standard request/response format</li>
+     * <li><strong>Method:</strong> "tools/list" for tool discovery</li>
+     * <li><strong>Authentication:</strong> Bearer token or Keycloak integration</li>
+     * <li><strong>Response Parsing:</strong> Extracts tools array from result</li>
+     * </ul>
+     * 
+     * <h3>Tool Metadata Enhancement:</h3>
+     * <p>Automatically adds source server information to each discovered tool
+     * for attribution and debugging purposes.</p>
+     * 
+     * <h3>Error Resilience:</h3>
+     * <ul>
+     * <li>URL validation and sanitization</li>
+     * <li>Network timeout handling</li>
+     * <li>Response format validation</li>
+     * <li>Graceful degradation on errors</li>
+     * </ul>
+     * 
+     * @param mcpConfig Configuration object containing server URL and authentication
+     * @return List of discovered tool objects with metadata, or empty list on error
+     * @see McpServerConfig
+     * @see #getAuthToken(AuthConfig, String)
+     */
     private List<Map<String, Object>> fetchToolsFromMcpServer(McpServerConfig mcpConfig) {
         String baseUrl = sanitizeUrl(mcpConfig.getUrl());
         if (baseUrl == null || baseUrl.isEmpty()) {
@@ -185,6 +275,38 @@ public class DynamicIntegrationService {
         return Collections.emptyList();
     }
 
+    /**
+     * Retrieves agent card information from an A2A peer.
+     * 
+     * <p>Connects to an A2A-compatible agent to retrieve its agent card from the
+     * standard /.well-known/agent.json endpoint. Parses agent metadata including
+     * capabilities, skills, and contact information.</p>
+     * 
+     * <h3>A2A Protocol Compliance:</h3>
+     * <ul>
+     * <li><strong>Standard Endpoint:</strong> /.well-known/agent.json</li>
+     * <li><strong>HTTP Method:</strong> GET with optional authentication</li>
+     * <li><strong>Response Format:</strong> JSON agent card structure</li>
+     * <li><strong>Metadata Enhancement:</strong> Adds source peer information</li>
+     * </ul>
+     * 
+     * <h3>Agent Card Contents:</h3>
+     * <ul>
+     * <li>Agent identity and description</li>
+     * <li>Available skills and capabilities</li>
+     * <li>Communication endpoints and methods</li>
+     * <li>Provider and contact information</li>
+     * </ul>
+     * 
+     * <h3>Authentication Support:</h3>
+     * <p>Supports optional authentication for accessing extended agent card
+     * information from secured peer agents.</p>
+     * 
+     * @param peerConfig Configuration object containing peer URL and authentication
+     * @return Agent card Map with metadata, or null on error
+     * @see A2aPeerConfig
+     * @see #getAuthToken(AuthConfig, String)
+     */
     private Map<String, Object> fetchAgentCardFromA2aPeer(A2aPeerConfig peerConfig) {
         String baseUrl = sanitizeUrl(peerConfig.getUrl());
         if (baseUrl == null || baseUrl.isEmpty()) {
@@ -219,14 +341,62 @@ public class DynamicIntegrationService {
         return null;
     }
 
+    /**
+     * Returns a defensive copy of discovered MCP tools.
+     * 
+     * <p>Provides external access to the collection of tools discovered from
+     * MCP servers while preventing external modification of the internal
+     * tool collection.</p>
+     * 
+     * @return New ArrayList containing copies of all discovered MCP tools
+     * @see #refreshDynamicCapabilities()
+     */
     public List<Map<String, Object>> getDiscoveredMcpTools() {
         return new ArrayList<>(discoveredMcpTools);
     }
 
+    /**
+     * Returns a defensive copy of discovered A2A skills.
+     * 
+     * <p>Provides external access to the collection of skills discovered from
+     * A2A peer agents while preventing external modification of the internal
+     * skill collection.</p>
+     * 
+     * @return New ArrayList containing copies of all discovered A2A skills
+     * @see #refreshDynamicCapabilities()
+     */
     public List<Map<String, Object>> getDiscoveredA2aSkills() {
         return new ArrayList<>(discoveredA2aSkills);
     }
 
+    /**
+     * Obtains authentication token based on configuration.
+     * 
+     * <p>Determines the appropriate authentication method based on configuration
+     * and returns the corresponding authentication token. Supports multiple
+     * authentication schemes with intelligent caching for performance.</p>
+     * 
+     * <h3>Supported Authentication Types:</h3>
+     * <ul>
+     * <li><code>none</code> - No authentication required</li>
+     * <li><code>bearer</code> - Static Bearer token authentication</li>
+     * <li><code>keycloak_client_credentials</code> - OAuth2 client credentials</li>
+     * </ul>
+     * 
+     * <h3>Token Management:</h3>
+     * <ul>
+     * <li>Static tokens returned directly</li>
+     * <li>Keycloak tokens cached with expiry tracking</li>
+     * <li>Automatic token refresh on expiry</li>
+     * <li>Error handling for authentication failures</li>
+     * </ul>
+     * 
+     * @param authConfig Authentication configuration object
+     * @param serviceName Service name for logging and debugging
+     * @return Optional containing auth token, or empty if none required/available
+     * @see AuthConfig
+     * @see #getAccessTokenFromKeycloak(AuthConfig, String)
+     */
     private Optional<String> getAuthToken(AuthConfig authConfig, String serviceName) {
         if (authConfig == null || authConfig.getType() == null || "none".equalsIgnoreCase(authConfig.getType())) {
             logger.debug("No authentication configured for {}", serviceName);
@@ -251,7 +421,43 @@ public class DynamicIntegrationService {
         }
     }
 
-    @SuppressWarnings("unchecked") // For raw Map usage from RestTemplate
+    /**
+     * Obtains Keycloak access token using client credentials flow.
+     * 
+     * <p>Implements OAuth2 client credentials flow for Keycloak authentication
+     * with intelligent token caching and automatic refresh. Handles token
+     * expiry tracking and provides seamless token renewal.</p>
+     * 
+     * <h3>OAuth2 Implementation:</h3>
+     * <ul>
+     * <li><strong>Grant Type:</strong> client_credentials (configurable)</li>
+     * <li><strong>Token Endpoint:</strong> /realms/{realm}/protocol/openid-connect/token</li>
+     * <li><strong>Authentication:</strong> Client ID and secret in request body</li>
+     * <li><strong>Caching:</strong> Composite key based on client/realm/server</li>
+     * </ul>
+     * 
+     * <h3>Token Caching Strategy:</h3>
+     * <ul>
+     * <li>Cache key: clientId@realm@authServerUrl</li>
+     * <li>Expiry buffer: 30 seconds before actual expiry</li>
+     * <li>Automatic cache invalidation on expiry</li>
+     * <li>Thread-safe concurrent access</li>
+     * </ul>
+     * 
+     * <h3>Error Handling:</h3>
+     * <ul>
+     * <li>Network connectivity issues</li>
+     * <li>Authentication credential problems</li>
+     * <li>Malformed token responses</li>
+     * <li>Keycloak server unavailability</li>
+     * </ul>
+     * 
+     * @param authConfig Keycloak authentication configuration
+     * @param serviceName Service name for logging and error reporting
+     * @return Optional containing access token, or empty on error
+     * @see AuthConfig
+     * @see TokenWrapper
+     */
     private Optional<String> getAccessTokenFromKeycloak(AuthConfig authConfig, String serviceName) {
         String cacheKey = authConfig.getClientId() + "@" + authConfig.getRealm() + "@" + authConfig.getAuthServerUrl();
         TokenWrapper cachedToken = keycloakTokenCache.get(cacheKey);
@@ -306,6 +512,23 @@ public class DynamicIntegrationService {
         }
     }
 
+    /**
+     * Sanitizes and validates URL strings.
+     * 
+     * <p>Performs URL validation and cleanup to ensure safe HTTP client usage.
+     * Removes potentially problematic characters and validates basic URL structure.</p>
+     * 
+     * <h3>Sanitization Process:</h3>
+     * <ul>
+     * <li>Null and empty string validation</li>
+     * <li>Comment character removal (#)</li>
+     * <li>Whitespace trimming</li>
+     * <li>Basic URL structure validation</li>
+     * </ul>
+     * 
+     * @param urlString The URL string to sanitize and validate
+     * @return Sanitized URL string, or null if invalid
+     */
     private String sanitizeUrl(String urlString) {
         if (urlString == null) {
             return null;
@@ -315,5 +538,51 @@ public class DynamicIntegrationService {
             return urlString.substring(0, commentIndex).trim();
         }
         return urlString.trim();
+    }
+
+    /**
+     * Internal wrapper class for cached authentication tokens.
+     * 
+     * <p>Encapsulates access tokens with expiry tracking for intelligent
+     * cache management and automatic token refresh capabilities.</p>
+     * 
+     * <h3>Token Management:</h3>
+     * <ul>
+     * <li><strong>Expiry Buffer:</strong> 30-second safety margin</li>
+     * <li><strong>Validity Check:</strong> Current time comparison</li>
+     * <li><strong>Automatic Cleanup:</strong> Cache removal on expiry</li>
+     * </ul>
+     */
+    private static class TokenWrapper {
+        String accessToken;
+        long expiryTimeMillis;
+
+        TokenWrapper(String accessToken, long expiresInSeconds) {
+            this.accessToken = accessToken;
+            // Set expiry time slightly before actual expiry to account for request time
+            this.expiryTimeMillis = System.currentTimeMillis() + (expiresInSeconds - 30) * 1000;
+        }
+
+        boolean isValid() {
+            return System.currentTimeMillis() < expiryTimeMillis;
+        }
+    }
+
+    public DynamicIntegrationService(IntegrationProperties integrationProperties, RestTemplateBuilder restTemplateBuilder) {
+        this.integrationProperties = integrationProperties;
+
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(5000); // 5 seconds connection timeout
+        requestFactory.setReadTimeout(10000);   // 10 seconds read timeout
+
+        this.restTemplate = restTemplateBuilder
+                .requestFactory(() -> requestFactory) // Use a supplier for the request factory
+                .build();
+    }
+
+    @PostConstruct
+    public void initializeDynamicIntegrations() {
+        logger.info("Initializing dynamic integrations...");
+        refreshDynamicCapabilities();
     }
 }

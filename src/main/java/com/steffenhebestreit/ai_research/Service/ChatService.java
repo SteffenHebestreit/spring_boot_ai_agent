@@ -57,15 +57,15 @@ public class ChatService {
 
     /**
      * Add a message to an existing chat
-     */
-    @Transactional
+     */    @Transactional
     public Chat addMessageToChat(String chatId, Message message) {
         return getChatById(chatId).map(chat -> {
             ChatMessage chatMessage = ChatMessage.fromMessage(message);
             
-            // Summarize if content is long enough
-            if (message.getContent() != null && message.getContent().length() > 200) { // Example threshold
-                String summary = openAIService.summarizeMessage(message.getContent());
+            // Summarize if content is long enough and is a string
+            String contentAsString = message.getContentAsString();
+            if (contentAsString != null && contentAsString.length() > 200) { // Example threshold
+                String summary = openAIService.summarizeMessage(contentAsString);
                 if (summary != null && !summary.isEmpty()) {
                     chatMessage.setSummary(summary);
                 }
