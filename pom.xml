@@ -7,12 +7,11 @@
 		<artifactId>spring-boot-starter-parent</artifactId>
 		<version>3.2.5</version> <!-- Downgraded Spring Boot version -->
 		<relativePath/> <!-- lookup parent from repository -->
-	</parent>
-	<groupId>com.steffenhebestreit</groupId>
+	</parent>	<groupId>com.steffenhebestreit</groupId>
 	<artifactId>ai_research</artifactId>
-	<version>0.0.1-SNAPSHOT</version>
+	<version>1.1.0-SNAPSHOT</version>
 	<name>AI Research Project</name>
-	<description>A Spring Boot project for AI research.</description>
+	<description>A Spring Boot project for AI research with 100% MCP compliance.</description>
 	<url>https://github.com/SteffenHebestreit/spring_boot_ai_agent</url>
 	<licenses>
 		<license>
