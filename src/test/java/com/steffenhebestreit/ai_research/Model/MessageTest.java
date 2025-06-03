@@ -122,15 +122,14 @@ public class MessageTest {
         // Then
         assertEquals(textContent, result);
     }
-    
-    @Test
+      @Test
     void getContentAsString_WithNonStringContent_ShouldReturnNull() {
         // Given
         // Create a multimodal content object (could be a list of content blocks)
-        Object multimodalContent = new HashMap<String, Object>() {{
-            put("text", "Here's an image");
-            put("imageUrl", "data:image/jpeg;base64,/9j/4AAQSkZJRgABA");
-        }};
+        Map<String, Object> multimodalContent = new HashMap<>();
+        multimodalContent.put("text", "Here's an image");
+        multimodalContent.put("imageUrl", "data:image/jpeg;base64,/9j/4AAQSkZJRgABA");
+        
         Message message = new Message("user", "multipart/mixed", multimodalContent);
         
         // When

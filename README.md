@@ -518,14 +518,16 @@ The application supports processing multimodal content (text + images/PDFs) with
 - **File Processing Services**: Comprehensive file validation, transformation, and data URI conversion
 - **Streaming Support**: Real-time multimodal content processing with progress updates
 - **API Endpoints**: Dedicated endpoints for multimodal interactions
+- **Dynamic LLM Selection**: Ability to specify which LLM to use for each streaming request
 
 **Key Features:**
 - Automatic capability matching between content types and available models
 - Base64 data URI conversion for seamless API integration
 - File size and format validation with detailed error reporting
 - Support for both synchronous and streaming multimodal processing
+- Model-specific request routing through query parameters
 
-For detailed technical information, see the [Multimodal Content Support](docs/multimodal-content-support.md) documentation.
+For detailed technical information, see the [Multimodal Content Support](docs/multimodal-content-support.md) and [Chat Controller Updates](docs/chat-controller-updates.md) documentation.
 
 ### API Documentation
 

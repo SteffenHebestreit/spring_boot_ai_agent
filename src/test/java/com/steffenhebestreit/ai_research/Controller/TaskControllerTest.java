@@ -16,6 +16,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.security.test.context.support.WithMockUser;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -56,9 +57,8 @@ class TaskControllerTest {
         objectMapper = new ObjectMapper();
         objectMapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
         objectMapper.disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-    }
-
-    @Test
+    }    @Test
+    @WithMockUser(username = "user")
     void createTask_ShouldReturnCreatedStatus() throws Exception {
         // Given
         Message initialMessage = new Message("user", "text/plain", "Research quantum computing");
@@ -72,8 +72,8 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.result.id").value(mockTask.getId()))
                 .andExpect(jsonPath("$.result.status.state").value("PENDING"));
     }
-    
-    @Test
+      @Test
+    @WithMockUser(username = "user")
     void getTask_WithExistingId_ShouldReturnTask() throws Exception {
         // Given
         String taskId = UUID.randomUUID().toString();
@@ -87,8 +87,8 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.result.id").value(taskId))
                 .andExpect(jsonPath("$.result.messages[0].role").value("user"));
     }
-    
-    @Test
+      @Test
+    @WithMockUser(username = "user")
     void getTask_WithNonExistingId_ShouldReturnNotFound() throws Exception {
         // Given
         String nonExistingTaskId = "non-existing-id";
@@ -98,8 +98,8 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.error.code").value(-32602))
                 .andExpect(jsonPath("$.error.message").value("Task not found with ID: " + nonExistingTaskId));
     }
-    
-    @Test
+      @Test
+    @WithMockUser(username = "user")
     void sendMessage_ToExistingTask_ShouldReturnUpdatedTask() throws Exception {
         // Given
         String taskId = UUID.randomUUID().toString();
@@ -128,8 +128,8 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.result.id").value(taskId))
                 .andExpect(jsonPath("$.result.messages.length()").value(2));
     }
-    
-    @Test
+      @Test
+    @WithMockUser(username = "user")
     void cancelTask_ExistingTask_ShouldReturnCancelledTask() throws Exception {
         // Given
         String taskId = UUID.randomUUID().toString();
@@ -143,8 +143,8 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.result.id").value(taskId))
                 .andExpect(jsonPath("$.result.status.state").value("CANCELLED"));
     }
-    
-    @Test
+      @Test
+    @WithMockUser(username = "user")
     void cancelTask_NonExistingTask_ShouldReturnNotFound() throws Exception {
         // Given
         String nonExistingTaskId = "non-existing-id";

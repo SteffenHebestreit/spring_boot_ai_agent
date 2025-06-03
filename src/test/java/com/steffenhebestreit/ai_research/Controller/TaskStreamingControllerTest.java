@@ -14,6 +14,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.security.test.context.support.WithMockUser;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -44,8 +45,8 @@ class TaskStreamingControllerTest {
 
     @BeforeEach
     void setUp() {
-    }
-      @Test
+    }    @Test
+    @WithMockUser(username = "user")
     void resubscribe_WithValidTaskId_ShouldReturnEmitter() throws Exception {
         // Given
         String taskId = UUID.randomUUID().toString();
@@ -67,8 +68,8 @@ class TaskStreamingControllerTest {
                 
         // Verify that the task was retrieved
         verify(taskService).getTask(taskId);
-    }
-      @Test
+    }    @Test
+    @WithMockUser(username = "user")
     void resubscribe_WithInvalidTaskId_ShouldThrowException() throws Exception {
         // Given
         String nonExistingTaskId = "non-existing-id";
@@ -90,8 +91,8 @@ class TaskStreamingControllerTest {
             assertTrue(e.getCause() instanceof IllegalArgumentException);
             assertTrue(e.getCause().getMessage().contains("Task not found with ID: non-existing-id"));
         }
-    }
-      @Test
+    }    @Test
+    @WithMockUser(username = "user")
     void streamMessages_WithValidData_ShouldReturnEmitter() throws Exception {
         // Given
         String taskId = UUID.randomUUID().toString();
@@ -122,8 +123,8 @@ class TaskStreamingControllerTest {
             "Research quantum computing please".equals(message.get("content"))
         ));
     }
-    
-    @Test
+      @Test
+    @WithMockUser(username = "user")
     void sendTaskUpdate_WithRegisteredEmitter_ShouldSendUpdate() throws Exception {
         // Given
         String taskId = UUID.randomUUID().toString();
