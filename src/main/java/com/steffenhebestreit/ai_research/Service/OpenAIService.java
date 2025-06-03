@@ -79,6 +79,10 @@ public class OpenAIService {
     }
 
     public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
+        return getChatCompletionStream(conversationMessages, openAIProperties.getModel());
+    }
+    
+    public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
         List<Map<String, Object>> messagesForLlm = new ArrayList<>();
         if (conversationMessages != null) {
             for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : conversationMessages) {
@@ -99,13 +103,13 @@ public class OpenAIService {
         }
 
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", openAIProperties.getModel());
+        requestBody.put("model", modelId);
         requestBody.put("messages", messagesForLlm); // Use the full conversation history
         requestBody.put("stream", true);
 
         String path = "/chat/completions";
 
-        logger.info("Sending streaming request to LLM: {} with model: {} and {} messages.", openAIProperties.getBaseurl() + path, openAIProperties.getModel(), messagesForLlm.size());
+        logger.info("Sending streaming request to LLM: {} with model: {} and {} messages.", openAIProperties.getBaseurl() + path, modelId, messagesForLlm.size());
         if (messagesForLlm.size() <= 2) { // Log first few messages for debugging if history is short
             messagesForLlm.forEach(m -> logger.debug("Message to LLM: Role: {}, Content: {}", m.get("role"), ((String)m.get("content")).substring(0, Math.min(100, ((String)m.get("content")).length()))));
         }

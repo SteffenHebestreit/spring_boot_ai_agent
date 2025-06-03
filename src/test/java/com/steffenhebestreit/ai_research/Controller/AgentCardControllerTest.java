@@ -10,6 +10,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.context.annotation.Import;
 import com.steffenhebestreit.ai_research.Configuration.SecurityConfig;
+import com.steffenhebestreit.ai_research.Configuration.TestSecurityConfig;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 import org.springframework.test.context.ActiveProfiles;
@@ -39,7 +40,7 @@ import org.mockito.Mockito;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
-@Import({SecurityConfig.class, AgentCardControllerTest.AgentCardControllerTestConfiguration.class})
+@Import({SecurityConfig.class, TestSecurityConfig.class, AgentCardControllerTest.AgentCardControllerTestConfiguration.class})
 class AgentCardControllerTest {
 
     @TestConfiguration

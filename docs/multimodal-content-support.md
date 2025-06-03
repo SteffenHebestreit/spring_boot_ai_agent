@@ -145,6 +145,29 @@ public class MultimodalController {
 }
 ```
 
+### Dynamic LLM Selection
+
+In addition to the multimodal-specific endpoints, the standard chat streaming endpoint now supports dynamic LLM selection:
+
+```java
+@PostMapping(value = "/{chatId}/message/stream", 
+            consumes = MediaType.TEXT_PLAIN_VALUE, 
+            produces = MediaType.APPLICATION_NDJSON_VALUE)
+public Flux<String> streamMessage(
+        @PathVariable String chatId, 
+        @RequestBody String userMessageContent,
+        @RequestParam(value = "llmId", required = false) String llmId) {
+    // Use specified model or fall back to default
+    String modelToUse = (llmId != null && !llmId.isEmpty()) ? 
+        llmId : openAIProperties.getModel();
+    
+    // Process with the selected model
+    // ...
+}
+```
+
+This allows clients to specify which LLM to use for each request, providing more flexibility in model selection based on the task requirements or content type. For complete details, see the [Chat Controller Updates](chat-controller-updates.md) documentation.
+
 ## Usage Examples
 
 ### Sending a Multimodal Request

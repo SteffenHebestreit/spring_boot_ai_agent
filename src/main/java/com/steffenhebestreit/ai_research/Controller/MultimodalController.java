@@ -12,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import reactor.core.publisher.Flux;
 
 import java.io.IOException;
@@ -26,12 +27,11 @@ import java.util.Map;
  * Models to analyze and respond to multimodal inputs.
  * <p>
  * Key features include:
- * <ul>
- *   <li><b>File upload handling</b> - Supports images (JPG, PNG, etc.) and PDF documents</li>
+ * <ul> *   <li><b>File upload handling</b> - Supports images (JPG, PNG, etc.) and PDF documents</li>
  *   <li><b>LLM capability validation</b> - Ensures selected models support the uploaded content type</li>
  *   <li><b>Streaming and non-streaming responses</b> - Both real-time and complete response options</li>
  *   <li><b>Chat history integration</b> - Automatically saves conversations for context</li>
- *   <li><b>Error handling</b> - Comprehensive validation and error reporting</li>
+ *   <li><b>Error handling</b> - Comprehensive validation and error reporting, including file size limits</li>
  * </ul>
  * <p> * The controller works with several supporting services:
  * <ul>
@@ -89,12 +89,16 @@ public class MultimodalController {
      *   <li>Returns the complete response and saves the conversation</li>
      * </ol>
      * <p>
-     * <b>File requirements:</b>
+    * <b>File requirements:</b>
      * <ul>
      *   <li>Images: JPG, PNG, GIF, WebP (max 10MB)</li>
      *   <li>Documents: PDF (max 20MB)</li>
      *   <li>LLM must support the specific file type</li>
      * </ul>
+     * <p>
+     * Exceeding these file size limits will result in a 400 Bad Request response with 
+     * a descriptive error message. See {@link GlobalExceptionHandler} for details on 
+     * exception handling.
      * 
      * @param prompt Optional text prompt to accompany the file analysis.
      *               If not provided, defaults to "Analyze this content."
@@ -175,11 +179,15 @@ public class MultimodalController {
      *   <li>Saves the complete conversation when streaming completes</li>
      * </ol>
      * <p>
-     * <b>Response format:</b> Each chunk is delivered as a newline-delimited JSON (NDJSON) stream,
+    * <b>Response format:</b> Each chunk is delivered as a newline-delimited JSON (NDJSON) stream,
      * where each line contains a piece of the response text. The stream ends when the LLM
      * completes its response.
      * <p>
      * <b>File requirements:</b> Same as {@link #chatMultimodal}
+     * <p>
+     * Exceeding the file size limits will result in an error response in the stream with 
+     * a descriptive error message. See {@link GlobalExceptionHandler} for details on 
+     * exception handling.
      * 
      * @param prompt Optional text prompt to accompany the file analysis.
      *               If not provided, defaults to "Analyze this content."

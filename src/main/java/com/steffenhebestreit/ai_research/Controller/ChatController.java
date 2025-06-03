@@ -1,5 +1,6 @@
 package com.steffenhebestreit.ai_research.Controller;
 
+import com.steffenhebestreit.ai_research.Configuration.OpenAIProperties;
 import com.steffenhebestreit.ai_research.Model.Chat;
 import com.steffenhebestreit.ai_research.Model.ChatMessage;
 import com.steffenhebestreit.ai_research.Model.Message;
@@ -69,17 +70,20 @@ import java.util.Map;
 public class ChatController {    private static final Logger logger = LoggerFactory.getLogger(ChatController.class);
     private final ChatService chatService;
     private final OpenAIService openAIService;
+    private final OpenAIProperties openAIProperties;
 
     /**
      * Constructs a ChatController with required service dependencies.
      * 
      * @param chatService Service for chat session management and persistence
      * @param openAIService Service for AI model interactions and response generation
+     * @param openAIProperties Configuration properties for the OpenAI API
      */
-    public ChatController(ChatService chatService, OpenAIService openAIService) {
+    public ChatController(ChatService chatService, OpenAIService openAIService, OpenAIProperties openAIProperties) {
         this.chatService = chatService;
         this.openAIService = openAIService;
-    }    /**
+        this.openAIProperties = openAIProperties;
+    }/**
      * Retrieves all chat sessions in the system.
      * 
      * <p>Returns a list of all chat sessions with their basic information including
@@ -254,15 +258,24 @@ public class ChatController {    private static final Logger logger = LoggerFact
      * @return Flux&lt;String&gt; streaming AI response chunks in NDJSON format
      * @throws IllegalArgumentException if userMessageContent is null or empty
      * @see #addMessageToChat(String, Message) for saving messages to chat
-     */
-    @PostMapping(value = "/{chatId}/message/stream", consumes = MediaType.TEXT_PLAIN_VALUE, 
+     */    @PostMapping(value = "/{chatId}/message/stream", consumes = MediaType.TEXT_PLAIN_VALUE, 
                 produces = MediaType.APPLICATION_NDJSON_VALUE)
-    public Flux<String> streamMessage(@PathVariable String chatId, @RequestBody String userMessageContent) {
+    public Flux<String> streamMessage(
+            @PathVariable String chatId, 
+            @RequestBody String userMessageContent,
+            @RequestParam(value = "llmId", required = false) String llmId) {
+        
         if (userMessageContent == null || userMessageContent.trim().isEmpty()) {
             return Flux.error(new IllegalArgumentException("User message cannot be empty"));
         }
 
         try {
+            // Use the specified llmId or fall back to the default model
+            String modelToUse = (llmId != null && !llmId.isEmpty()) ? 
+                llmId : openAIProperties.getModel();
+            
+            logger.info("Using LLM model: {} for chat: {}", modelToUse, chatId);
+            
             // Fetch the existing conversation history
             List<ChatMessage> conversationHistory = chatService.getChatMessages(chatId);
             
@@ -302,7 +315,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
                 conversationHistory = List.of(currentMsg);
             }
 
-            return openAIService.getChatCompletionStream(conversationHistory)
+            return openAIService.getChatCompletionStream(conversationHistory, modelToUse)
                     .doOnError(e -> logger.error("Error during AI stream for chat {}: {}", chatId, e.getMessage(), e))
                     .onErrorResume(e -> Flux.just("{\"error\": \"Error processing your request: " + e.getMessage().replace("\"", "\\\"") + "\"}")); // Send error as JSON
         } catch (Exception e) {
