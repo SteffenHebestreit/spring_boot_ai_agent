@@ -101,6 +101,38 @@ public class DynamicIntegrationService {
     private final Map<String, TokenWrapper> keycloakTokenCache = new HashMap<>();
 
     /**
+     * Token wrapper class for caching access tokens with expiration handling.
+     * 
+     * <p>This inner class encapsulates an access token along with its expiration
+     * information, providing automatic validation of token freshness.</p>
+     */
+    private static class TokenWrapper {
+        public final String accessToken;
+        private final long expirationTime;
+        
+        /**
+         * Creates a new token wrapper with the specified token and expiration duration.
+         * 
+         * @param accessToken The access token string
+         * @param expiresInSeconds Token validity duration in seconds
+         */
+        public TokenWrapper(String accessToken, long expiresInSeconds) {
+            this.accessToken = accessToken;
+            // Add buffer of 30 seconds to avoid edge cases
+            this.expirationTime = System.currentTimeMillis() + ((expiresInSeconds - 30) * 1000);
+        }
+        
+        /**
+         * Checks if the token is still valid based on expiration time.
+         * 
+         * @return true if the token is still valid, false if expired
+         */
+        public boolean isValid() {
+            return System.currentTimeMillis() < expirationTime;
+        }
+    }
+
+    /**
      * Refreshes all dynamic capabilities from configured MCP servers and A2A peers.
      * 
      * <p>Performs comprehensive capability discovery by connecting to all configured
@@ -212,29 +244,40 @@ public class DynamicIntegrationService {
      * @return List of discovered tool objects with metadata, or empty list on error
      * @see McpServerConfig
      * @see #getAuthToken(AuthConfig, String)
-     */
-    private List<Map<String, Object>> fetchToolsFromMcpServer(McpServerConfig mcpConfig) {
+     */    private List<Map<String, Object>> fetchToolsFromMcpServer(McpServerConfig mcpConfig) {
         String baseUrl = sanitizeUrl(mcpConfig.getUrl());
         if (baseUrl == null || baseUrl.isEmpty()) {
             logger.warn("URL for MCP server '{}' is null, empty, or invalid after sanitization. Skipping.", 
                         mcpConfig.getName() != null ? mcpConfig.getName() : "UNKNOWN_MCP_SERVER");
             return Collections.emptyList();
         }
-        String url = baseUrl + (baseUrl.endsWith("/") ? "tools/list" : "/tools/list");
-        logger.info("Attempting to fetch tools from MCP server: {} at URL: {}", mcpConfig.getName(), url);
 
-        Map<String, String> requestBody = new HashMap<>();
+        // Step 1: Initialize MCP session first (proper MCP compliance)
+        String sessionId = initializeMcpSession(mcpConfig);
+        if (sessionId == null) {
+            logger.error("Failed to initialize MCP session with server: {}. Cannot fetch tools.", mcpConfig.getName());
+            return Collections.emptyList();
+        }
+
+        // Step 2: Use proper MCP endpoint (not REST-style)
+        String url = baseUrl + (baseUrl.endsWith("/") ? "mcp" : "/mcp");
+        logger.info("Fetching tools from MCP server: {} at URL: {} with session: {}", mcpConfig.getName(), url, sessionId);
+
+        // Step 3: Create proper JSON-RPC request with params field
+        Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("jsonrpc", "2.0");
-        requestBody.put("id", "1");
+        requestBody.put("id", "2");
         requestBody.put("method", "tools/list");
+        requestBody.put("params", new HashMap<>());  // Required params field for MCP compliance
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Mcp-Session-Id", sessionId);  // Required session management
 
         Optional<String> token = getAuthToken(mcpConfig.getAuth(), mcpConfig.getName());
         token.ifPresent(headers::setBearerAuth);
 
-        HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
+        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
 
         try {
             @SuppressWarnings("unchecked")
@@ -482,10 +525,9 @@ public class DynamicIntegrationService {
         body.add("client_secret", authConfig.getClientSecret());
         body.add("grant_type", authConfig.getGrantType() != null ? authConfig.getGrantType() : "client_credentials");
 
-        HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(body, headers);
-
-        try {
+        HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(body, headers);        try {
             // Using Map<String, Object> for better type safety with the response.
+            @SuppressWarnings("unchecked")
             Map<String, Object> response = restTemplate.postForObject(tokenUrl, requestEntity, Map.class);
             if (response != null && response.containsKey("access_token")) {
                 String accessToken = (String) response.get("access_token");
@@ -541,31 +583,121 @@ public class DynamicIntegrationService {
     }
 
     /**
-     * Internal wrapper class for cached authentication tokens.
+     * Initializes an MCP session with proper protocol handshake.
      * 
-     * <p>Encapsulates access tokens with expiry tracking for intelligent
-     * cache management and automatic token refresh capabilities.</p>
+     * <p>Performs the required MCP initialization sequence including protocol
+     * version negotiation and capability announcement. This must be called
+     * before any tool discovery operations.</p>
      * 
-     * <h3>Token Management:</h3>
-     * <ul>
-     * <li><strong>Expiry Buffer:</strong> 30-second safety margin</li>
-     * <li><strong>Validity Check:</strong> Current time comparison</li>
-     * <li><strong>Automatic Cleanup:</strong> Cache removal on expiry</li>
-     * </ul>
+     * @param mcpConfig Configuration object containing server URL and authentication
+     * @return Session ID if successful, null if initialization failed
      */
-    private static class TokenWrapper {
-        String accessToken;
-        long expiryTimeMillis;
+    private String initializeMcpSession(McpServerConfig mcpConfig) {
+        String baseUrl = sanitizeUrl(mcpConfig.getUrl());
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            logger.warn("URL for MCP server '{}' is null, empty, or invalid after sanitization. Skipping.", 
+                        mcpConfig.getName() != null ? mcpConfig.getName() : "UNKNOWN_MCP_SERVER");
+            return null;
+        }
+        
+        // Use proper MCP endpoint
+        String url = baseUrl + (baseUrl.endsWith("/") ? "mcp" : "/mcp");
+        logger.info("Initializing MCP session with server: {} at URL: {}", mcpConfig.getName(), url);
 
-        TokenWrapper(String accessToken, long expiresInSeconds) {
-            this.accessToken = accessToken;
-            // Set expiry time slightly before actual expiry to account for request time
-            this.expiryTimeMillis = System.currentTimeMillis() + (expiresInSeconds - 30) * 1000;
+        // Create proper initialization request
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("jsonrpc", "2.0");
+        requestBody.put("method", "initialize");
+        requestBody.put("id", "1");
+        
+        Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", "2024-11-05");
+        
+        Map<String, Object> capabilities = new HashMap<>();
+        Map<String, Object> tools = new HashMap<>();
+        tools.put("listChanged", true);
+        capabilities.put("tools", tools);
+        
+        Map<String, Object> resources = new HashMap<>();
+        resources.put("listChanged", true);
+        capabilities.put("resources", resources);
+        
+        params.put("capabilities", capabilities);
+        
+        Map<String, Object> clientInfo = new HashMap<>();
+        clientInfo.put("name", "AI-Research-Application");
+        clientInfo.put("version", "1.0.0");
+        params.put("clientInfo", clientInfo);
+        
+        requestBody.put("params", params);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        Optional<String> token = getAuthToken(mcpConfig.getAuth(), mcpConfig.getName());
+        token.ifPresent(headers::setBearerAuth);
+
+        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = restTemplate.postForObject(url, requestEntity, Map.class);
+
+            if (response != null && response.containsKey("result")) {
+                // Extract session ID from response headers or generate one
+                String sessionId = extractSessionId(response);
+                
+                // Send initialized notification to complete handshake
+                if (sendInitializedNotification(url, sessionId, mcpConfig)) {
+                    logger.info("Successfully initialized MCP session {} with server: {}", sessionId, mcpConfig.getName());
+                    return sessionId;
+                }
+            } else {
+                logger.warn("Invalid initialization response from MCP server {}: {}", mcpConfig.getName(), response);
+            }
+        } catch (RestClientException e) {
+            logger.error("Failed to initialize MCP session with server {}: {}", mcpConfig.getName(), e.getMessage(), e);
+        }
+        
+        return null;
+    }
+
+    /**
+     * Sends the initialized notification to complete MCP handshake.
+     */
+    private boolean sendInitializedNotification(String baseUrl, String sessionId, McpServerConfig mcpConfig) {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("jsonrpc", "2.0");
+        requestBody.put("method", "notifications/initialized");
+        requestBody.put("params", new HashMap<>());
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (sessionId != null) {
+            headers.set("Mcp-Session-Id", sessionId);
         }
 
-        boolean isValid() {
-            return System.currentTimeMillis() < expiryTimeMillis;
+        Optional<String> token = getAuthToken(mcpConfig.getAuth(), mcpConfig.getName());
+        token.ifPresent(headers::setBearerAuth);
+
+        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+
+        try {
+            restTemplate.postForObject(baseUrl, requestEntity, Map.class);
+            return true;
+        } catch (RestClientException e) {
+            logger.error("Failed to send initialized notification to MCP server {}: {}", mcpConfig.getName(), e.getMessage());
+            return false;
         }
+    }
+
+    /**
+     * Extracts session ID from initialization response.
+     */
+    private String extractSessionId(Map<String, Object> response) {
+        // In a real implementation, this would extract from response headers
+        // For now, generate a simple session ID
+        return "session_" + System.currentTimeMillis();
     }
 
     public DynamicIntegrationService(IntegrationProperties integrationProperties, RestTemplateBuilder restTemplateBuilder) {

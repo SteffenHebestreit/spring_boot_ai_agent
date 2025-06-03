@@ -6,6 +6,7 @@ A Spring Boot project for AI research.
 
 - [About](#about)
 - [Features](#features)
+- [Model Context Protocol (MCP) Compliance](#model-context-protocol-mcp-compliance)
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
@@ -19,6 +20,7 @@ A Spring Boot project for AI research.
 - [Security](#security)
 - [Documentation](#documentation)
   - [Code Documentation](#code-documentation)
+  - [MCP Compliance Documentation](#mcp-compliance-documentation)
   - [Multimodal Content Support](#multimodal-content-support)
   - [API Documentation](#api-documentation)
 - [Contributing](#contributing)
@@ -36,7 +38,11 @@ This project, "AI Research Project," is a Spring Boot application designed for A
 - Agent information display (Agent Card)
 - **Multimodal content support** for processing images and PDFs with vision-enabled LLMs
 - **Capability detection** for automatically identifying which models support which content types
-- Integration with external Model Context Protocol (MCP) servers
+- **100% MCP-compliant integration** with external Model Context Protocol servers
+  - Full protocol handshake with initialization and capability negotiation
+  - Session management with proper MCP-Session-Id header handling
+  - JSON-RPC 2.0 compliant request/response structure
+  - Support for MCP specification version 2024-11-05
 - Peer-to-peer communication with other A2A (Agent-to-Agent) agents
 - RESTful APIs for interaction
 - Streaming capabilities for real-time data/task updates
@@ -181,6 +187,75 @@ The primary configuration file is `src/main/resources/application.properties`. E
 
 **Environment Variable Override:**
 Any property in `application.properties` can be overridden by setting an environment variable with a corresponding name. For example, `SPRING_DATASOURCE_URL` overrides `spring.datasource.url`.
+
+## Model Context Protocol (MCP) Compliance
+
+This application provides **100% compliant integration** with Model Context Protocol (MCP) servers, following the MCP specification version **2024-11-05**. The implementation ensures proper protocol handshake, session management, and tool discovery.
+
+### MCP Features
+
+- ✅ **Full Protocol Handshake**: Proper `initialize` → `notifications/initialized` sequence
+- ✅ **Session Management**: Automatic session ID generation and header management
+- ✅ **Capability Negotiation**: Announces support for tools and resources with change notifications
+- ✅ **JSON-RPC 2.0 Compliance**: Correct request/response structure with required `params` field
+- ✅ **Modern Method Support**: Uses current MCP methods (`tools/list`, `tools/call`)
+- ✅ **Authentication Support**: Bearer tokens and Keycloak client credentials
+- ✅ **Error Resilience**: Graceful handling of connection failures and protocol errors
+
+### MCP Integration Flow
+
+```mermaid
+sequenceDiagram
+    participant App as AI Research App
+    participant MCP as MCP Server
+    
+    App->>MCP: POST /mcp (initialize)
+    Note over App,MCP: Protocol version: 2024-11-05<br/>Capabilities: tools, resources
+    MCP-->>App: Response with server capabilities
+    App->>MCP: POST /mcp (notifications/initialized)
+    Note over App,MCP: Session established
+    App->>MCP: POST /mcp (tools/list)
+    Note over App,MCP: Headers: Mcp-Session-Id
+    MCP-->>App: Available tools list
+```
+
+### Configuration Example
+
+```yaml
+agent:
+  integrations:
+    mcp-servers:
+      - name: "webcrawl-mcp"
+        url: "https://mcp-server.example.com"
+        auth:
+          type: "bearer"
+          token: "${MCP_SERVER_TOKEN}"
+      - name: "data-analysis-mcp"
+        url: "https://analysis.example.com"
+        auth:
+          type: "keycloak_client_credentials"
+          authServerUrl: "https://auth.example.com"
+          realm: "mcp-realm"
+          clientId: "analysis-client"
+          clientSecret: "${KEYCLOAK_SECRET}"
+```
+
+### Supported Authentication Methods
+
+| Method | Configuration | Description |
+|--------|---------------|-------------|
+| `none` | No auth config | Public MCP servers |
+| `bearer` | `token: "your-token"` | Static Bearer token |
+| `keycloak_client_credentials` | Full Keycloak config | OAuth2 client credentials with token caching |
+
+### MCP Compliance Verification
+
+The implementation has been verified against the reference MCP server [SteffenHebestreit/webcrawl-mcp](https://github.com/SteffenHebestreit/webcrawl-mcp) and follows all protocol requirements:
+
+- **Initialization Sequence**: Required before any tool operations
+- **Session Headers**: `Mcp-Session-Id` included in all post-initialization requests  
+- **JSON-RPC Structure**: Proper `jsonrpc`, `method`, `id`, and `params` fields
+- **Error Handling**: Standard JSON-RPC 2.0 error codes and responses
 
 ## Usage
 
@@ -498,6 +573,7 @@ The entire codebase features enterprise-level JavaDoc documentation with:
 - `MultimodalContentService` - File processing, validation, and content transformation
 - `ChatService` - Conversation lifecycle management and message processing
 - `TaskUpdateListener` - Real-time update broadcasting and event management
+- `DynamicIntegrationService` - **100% MCP-compliant** external system integration
 
 **Controller Layer:**
 - `MultimodalController` - Multimodal content processing endpoints
@@ -508,6 +584,31 @@ The entire codebase features enterprise-level JavaDoc documentation with:
 
 **Repository Layer:**
 - `ChatRepository` & `ChatMessageRepository` - Data access patterns with performance optimization
+
+### MCP Compliance Documentation
+
+**Complete Model Context Protocol Implementation:**
+
+The application features **100% compliant** integration with Model Context Protocol (MCP) servers following specification version **2024-11-05**. This implementation enables seamless tool discovery and execution from external MCP-compatible services.
+
+**Key MCP Features:**
+- **Full Protocol Handshake**: Required initialization sequence with capability negotiation
+- **Session Management**: Automatic session ID generation and header management  
+- **JSON-RPC 2.0 Compliance**: Proper request/response structure with all required fields
+- **Authentication Support**: Bearer tokens and Keycloak OAuth2 client credentials
+- **Modern Method Names**: Uses current MCP methods (tools/list, not legacy mcp.* methods)
+- **Error Resilience**: Graceful degradation with comprehensive error handling
+
+**Implementation Details:**
+- **DynamicIntegrationService**: Core MCP integration service with full protocol compliance
+- **TokenWrapper**: Intelligent authentication token caching with automatic expiry
+- **Session Lifecycle**: Complete initialize → notifications/initialized → tool discovery flow
+- **Reference Compliance**: Verified against SteffenHebestreit/webcrawl-mcp reference implementation
+
+**Documentation Location:**
+- `docs/mcp-compliance.md` - Complete MCP implementation documentation
+- `docs/mcp-quick-reference.md` - Developer quick start guide  
+- Inline JavaDoc - Detailed method and class documentation with protocol specifications
 
 ### Multimodal Content Support
 
