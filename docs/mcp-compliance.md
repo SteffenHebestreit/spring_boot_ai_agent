@@ -9,7 +9,7 @@ This document details the **100% compliant** Model Context Protocol (MCP) implem
 | **MCP Requirement** | **Status** | **Implementation Details** |
 |---------------------|------------|---------------------------|
 | Protocol Initialization | ✅ Complete | Full `initialize` → `notifications/initialized` handshake |
-| Session Management | ✅ Complete | Automatic session ID generation and tracking |
+| Session Management | ✅ Complete | Automatic session ID generation and tracking. Robust extraction from `initialize` JSON response body. |
 | JSON-RPC 2.0 Structure | ✅ Complete | Proper `jsonrpc`, `method`, `id`, `params` fields |
 | Capability Negotiation | ✅ Complete | Tools and resources capabilities with change notifications |
 | Modern Method Names | ✅ Complete | Uses `tools/list`, `tools/call` (not legacy methods) |
