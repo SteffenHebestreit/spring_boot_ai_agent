@@ -9,6 +9,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import java.util.Arrays;
+import java.util.UUID;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
@@ -16,6 +18,12 @@ import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
@@ -92,7 +100,7 @@ public class DynamicIntegrationService {
 
     private final IntegrationProperties integrationProperties;
     private final RestTemplate restTemplate;
-
+    
     // Store discovered tools and capabilities
     private final List<Map<String, Object>> discoveredMcpTools = new ArrayList<>();
     private final List<Map<String, Object>> discoveredA2aSkills = new ArrayList<>();
@@ -247,9 +255,39 @@ public class DynamicIntegrationService {
      */    private List<Map<String, Object>> fetchToolsFromMcpServer(McpServerConfig mcpConfig) {
         String baseUrl = sanitizeUrl(mcpConfig.getUrl());
         if (baseUrl == null || baseUrl.isEmpty()) {
-            logger.warn("URL for MCP server '{}' is null, empty, or invalid after sanitization. Skipping.", 
+            logger.warn("URL for MCP server '{}' is null, empty, or invalid after sanitization. Skipping.",
                         mcpConfig.getName() != null ? mcpConfig.getName() : "UNKNOWN_MCP_SERVER");
             return Collections.emptyList();
+        }
+
+        boolean isWebcrawl = mcpConfig.getName() != null &&
+                              mcpConfig.getName().toLowerCase().contains("webcrawl");
+        if (isWebcrawl) {
+            // Fallback: attempt direct GET /mcp/tools
+            String toolsUrl = baseUrl + (baseUrl.endsWith("/") ? "mcp/tools" : "/mcp/tools");
+            HttpHeaders getHeaders = new HttpHeaders();
+            Optional<String> token = getAuthToken(mcpConfig.getAuth(), mcpConfig.getName());
+            token.ifPresent(getHeaders::setBearerAuth);
+            HttpEntity<Void> getReq = new HttpEntity<>(getHeaders);
+
+            try {
+                @SuppressWarnings("unchecked")
+                ResponseEntity<List> resp = restTemplate.exchange(
+                    toolsUrl, HttpMethod.GET, getReq, List.class);
+                List<Map<String, Object>> tools = resp.getBody();
+                if (tools != null) {
+                    tools.forEach(tool -> {
+                        tool.putIfAbsent("sourceMcpServerName", mcpConfig.getName());
+                        tool.putIfAbsent("sourceMcpServerUrl", mcpConfig.getUrl());
+                    });
+                    logger.info("Fetched {} tools via GET /mcp/tools from {}", tools.size(), mcpConfig.getName());
+                    return tools;
+                }
+            } catch (RestClientException ex) {
+                logger.warn("GET /mcp/tools fallback failed for {}: {}. Proceeding with JSON-RPC...",
+                            mcpConfig.getName(), ex.getMessage());
+            }
+            logger.info("Falling back to JSON-RPC for webcrawl-mcp: {}", mcpConfig.getName());
         }
 
         // Step 1: Initialize MCP session first (proper MCP compliance)
@@ -266,7 +304,7 @@ public class DynamicIntegrationService {
         // Step 3: Create proper JSON-RPC request with params field
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("jsonrpc", "2.0");
-        requestBody.put("id", "2");
+        requestBody.put("id", UUID.randomUUID().toString());  // dynamic request ID
         requestBody.put("method", "tools/list");
         requestBody.put("params", new HashMap<>());  // Required params field for MCP compliance
 
@@ -591,84 +629,245 @@ public class DynamicIntegrationService {
      * 
      * @param mcpConfig Configuration object containing server URL and authentication
      * @return Session ID if successful, null if initialization failed
-     */
-    private String initializeMcpSession(McpServerConfig mcpConfig) {
+     */    private String initializeMcpSession(McpServerConfig mcpConfig) {
         String baseUrl = sanitizeUrl(mcpConfig.getUrl());
         if (baseUrl == null || baseUrl.isEmpty()) {
-            logger.warn("URL for MCP server '{}' is null, empty, or invalid after sanitization. Skipping.", 
-                        mcpConfig.getName() != null ? mcpConfig.getName() : "UNKNOWN_MCP_SERVER");
+            logger.warn("URL for MCP server '{}' is null, empty, or invalid. Skipping.", mcpConfig.getName());
             return null;
         }
-        
-        // Use proper MCP endpoint
-        String url = baseUrl + (baseUrl.endsWith("/") ? "mcp" : "/mcp");
-        logger.info("Initializing MCP session with server: {} at URL: {}", mcpConfig.getName(), url);
+        String mcpEndpointUrl = baseUrl + (baseUrl.endsWith("/") ? "mcp" : "/mcp");
 
-        // Create proper initialization request
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("jsonrpc", "2.0");
-        requestBody.put("method", "initialize");
-        requestBody.put("id", "1");
-        
-        Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", "2024-11-05");
-        
-        Map<String, Object> capabilities = new HashMap<>();
-        Map<String, Object> tools = new HashMap<>();
-        tools.put("listChanged", true);
-        capabilities.put("tools", tools);
-        
-        Map<String, Object> resources = new HashMap<>();
-        resources.put("listChanged", true);
-        capabilities.put("resources", resources);
-        
-        params.put("capabilities", capabilities);
-        
-        Map<String, Object> clientInfo = new HashMap<>();
-        clientInfo.put("name", "AI-Research-Application");
-        clientInfo.put("version", "1.0.0");
-        params.put("clientInfo", clientInfo);
-        
-        requestBody.put("params", params);
+        Map<String, Object> requestBodyMap = new HashMap<>();
+        requestBodyMap.put("jsonrpc", "2.0");
+        requestBodyMap.put("id", UUID.randomUUID().toString());
+        requestBodyMap.put("method", "initialize");
+        requestBodyMap.put("params", Collections.singletonMap("clientName", "AiResearchBackend"));
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-
         Optional<String> token = getAuthToken(mcpConfig.getAuth(), mcpConfig.getName());
         token.ifPresent(headers::setBearerAuth);
 
-        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBodyMap, headers);
+        String responseBody = null;
+        HttpHeaders responseHeaders = null;
+        String sessionIdFromHeader = null;
 
         try {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> response = restTemplate.postForObject(url, requestEntity, Map.class);
+            logger.info("Initializing MCP session with server: {} at URL: {}", mcpConfig.getName(), mcpEndpointUrl);
+            ResponseEntity<String> responseEntity = restTemplate.exchange(mcpEndpointUrl, HttpMethod.POST, requestEntity, String.class);
+            responseBody = responseEntity.getBody();
+            responseHeaders = responseEntity.getHeaders();
 
-            if (response != null && response.containsKey("result")) {
-                // Extract session ID from response headers or generate one
-                String sessionId = extractSessionId(response);
-                
-                // Send initialized notification to complete handshake
-                if (sendInitializedNotification(url, sessionId, mcpConfig)) {
-                    logger.info("Successfully initialized MCP session {} with server: {}", sessionId, mcpConfig.getName());
-                    return sessionId;
-                }
-            } else {
-                logger.warn("Invalid initialization response from MCP server {}: {}", mcpConfig.getName(), response);
+            if (logger.isInfoEnabled()) {
+                logger.info("Response headers from MCP initialize for server {}: {}", mcpConfig.getName(), responseHeaders.toSingleValueMap());
             }
+
+            List<String> headerValues = responseHeaders.get("Mcp-Session-Id");
+            if (headerValues == null || headerValues.isEmpty()) {
+                headerValues = responseHeaders.get("mcp-session-id"); 
+            }
+            if (headerValues != null && !headerValues.isEmpty()) {
+                sessionIdFromHeader = headerValues.get(0);
+                logger.info("Session ID found in '{}' header for server {}: {}",
+                        (responseHeaders.containsKey("Mcp-Session-Id") ? "Mcp-Session-Id" : "mcp-session-id"),
+                        mcpConfig.getName(), sessionIdFromHeader);
+            }
+
         } catch (RestClientException e) {
-            logger.error("Failed to initialize MCP session with server {}: {}", mcpConfig.getName(), e.getMessage(), e);
+            logger.error("RestClientException during MCP initialize for server {}: {}. URL: {}", mcpConfig.getName(), e.getMessage(), mcpEndpointUrl, e);
+            return attemptAlternateSessionSetup(baseUrl, mcpConfig);
         }
-        
-        return null;
+
+        String effectiveSessionId = sessionIdFromHeader;
+        String sessionIdSource = "header";
+
+        if (effectiveSessionId == null || effectiveSessionId.isEmpty()) {
+            logger.info("No session ID in headers for {}. Attempting to extract from body.", mcpConfig.getName());
+            if (responseBody != null && !responseBody.isEmpty()) {
+                try {
+                    ObjectMapper objectMapper = new ObjectMapper(); 
+                    Map<String, Object> parsedResponseBody = objectMapper.readValue(responseBody, new TypeReference<Map<String, Object>>() {});
+                    effectiveSessionId = extractSessionId(parsedResponseBody); // Corrected call
+                } catch (JsonProcessingException e) { 
+                    logger.error("Failed to parse MCP initialize response body (JSON error) for server {}: {}. Body: {}", mcpConfig.getName(), e.getMessage(), responseBody);
+                } catch (Exception e) { 
+                     logger.error("Unexpected error while parsing MCP initialize response body for server {}: {}. Body: {}", mcpConfig.getName(), e.getMessage(), responseBody, e);
+                }
+            }
+            sessionIdSource = "body"; // Set if header was empty, regardless of body parsing success for now
+        }
+
+        if (effectiveSessionId == null || effectiveSessionId.isEmpty()) {
+            effectiveSessionId = "client-failsafe-" + UUID.randomUUID().toString();
+            logger.warn("No session ID from header or body for {}. Using failsafe: {}", mcpConfig.getName(), effectiveSessionId);
+            sessionIdSource = "failsafe";
+        }
+
+        logger.info("MCP initialization call successful for server: {}, effective session ID: {} (source: {})",
+                mcpConfig.getName(), effectiveSessionId, sessionIdSource);
+
+        boolean isWebcrawl = mcpConfig.getName() != null && mcpConfig.getName().toLowerCase().contains("webcrawl");
+
+        if (isWebcrawl && !"failsafe".equals(sessionIdSource)) {
+            logger.info("For webcrawl-mcp (session ID: {}, source: {}), sending 'initialized' notification before validation.", effectiveSessionId, sessionIdSource);
+            boolean notificationSent = sendInitializedNotification(mcpEndpointUrl, effectiveSessionId, mcpConfig);
+            if (!notificationSent) {
+                logger.warn("Failed to send 'initialized' notification to webcrawl-mcp server: {}. Session validation will likely fail.", mcpConfig.getName());
+            }
+        } else if (isWebcrawl && "failsafe".equals(sessionIdSource)) {
+            logger.info("For webcrawl-mcp, session ID is failsafe ({}). Skipping 'initialized' notification.", effectiveSessionId);
+        }
+
+        boolean isValid;
+        if ("failsafe".equals(sessionIdSource)) {
+            logger.info("Session ID for {} is failsafe ({}). Skipping initial validation, will proceed to alternate setup.", mcpConfig.getName(), effectiveSessionId);
+            isValid = false; 
+        } else {
+            isValid = testSessionValidity(mcpEndpointUrl, effectiveSessionId, mcpConfig);
+        }
+
+        if (isValid) {
+            logger.info("Session ID {} (source: {}) validated for server: {}", effectiveSessionId, sessionIdSource, mcpConfig.getName());
+            return effectiveSessionId;
+        } else {
+            if (!"failsafe".equals(sessionIdSource)) {
+                logger.warn("Initial session ID {} (source: {}) failed validation for server: {}. Attempting alternate session management.", effectiveSessionId, sessionIdSource, mcpConfig.getName());
+            }
+            return attemptAlternateSessionSetup(baseUrl, mcpConfig);
+        }
     }
 
     /**
      * Sends the initialized notification to complete MCP handshake.
      */
-    private boolean sendInitializedNotification(String baseUrl, String sessionId, McpServerConfig mcpConfig) {
+    private boolean sendInitializedNotification(String mcpEndpointUrl, String sessionId, McpServerConfig mcpConfig) {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("jsonrpc", "2.0");
         requestBody.put("method", "notifications/initialized");
+        requestBody.put("params", new HashMap<>());
+
+        boolean isWebcrawlServer = mcpConfig.getName() != null && 
+                                 mcpConfig.getName().toLowerCase().contains("webcrawl");
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        
+        if (sessionId != null && !"no_session_required".equals(sessionId)) {
+            if (isWebcrawlServer) {
+                headers.set("Mcp-Session-Id", sessionId);
+                headers.set("X-Mcp-Session-Id", sessionId); 
+                headers.set("Session-Id", sessionId); 
+            } else {
+                headers.set("Mcp-Session-Id", sessionId);
+            }
+        }
+
+        Optional<String> token = getAuthToken(mcpConfig.getAuth(), mcpConfig.getName());
+        token.ifPresent(headers::setBearerAuth);
+
+        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+        
+        try {
+            if (isWebcrawlServer) {
+                logger.info("Attempting to send 'initialized' notification to webcrawl-mcp: {} with session ID in header: {}", mcpEndpointUrl, sessionId);
+                restTemplate.postForObject(mcpEndpointUrl, requestEntity, Object.class);
+                logger.info("Successfully sent 'initialized' notification to webcrawl-mcp server {} using session ID: {}", mcpConfig.getName(), sessionId);
+                return true;
+            } else {
+                restTemplate.postForObject(mcpEndpointUrl, requestEntity, Object.class);
+                logger.debug("Initialized notification sent successfully to MCP server: {}", mcpConfig.getName());
+                return true;
+            }
+        } catch (RestClientException e) {
+            String serverTypeMessage = isWebcrawlServer ? "webcrawl-mcp server " + mcpConfig.getName() : "MCP server " + mcpConfig.getName();
+            logger.warn("Failed to send 'initialized' notification to {}: {}. URL: {}, SessionID used: {}",
+                        serverTypeMessage, e.getMessage(), mcpEndpointUrl, (sessionId != null ? sessionId : "N/A"));
+            return false; 
+        }
+    }
+
+    /**
+     * Extracts session ID from initialization response.
+     */    private String extractSessionId(Map<String, Object> response) {
+        // Check if the response contains a session ID in the result
+        if (response != null && response.containsKey("result")) {
+            Object result = response.get("result");
+            if (result instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> resultMap = (Map<String, Object>) result;
+                
+                // Dump entire response for debugging
+                logger.debug("MCP initialize response structure: {}", resultMap.keySet());
+                
+                // Check for sessionId in the result (common in standard MCP)
+                if (resultMap.containsKey("sessionId")) {
+                    return (String) resultMap.get("sessionId");
+                }
+                
+                // Check for session_id in the result (alternative naming)
+                if (resultMap.containsKey("session_id")) {
+                    return (String) resultMap.get("session_id");
+                }
+                
+                // Check for id field that might be repurposed as session
+                if (resultMap.containsKey("id")) {
+                    Object idValue = resultMap.get("id");
+                    if (idValue instanceof String) {
+                        return (String) idValue;
+                    }
+                }
+                
+                // Some MCP servers might include it in serverInfo
+                if (resultMap.containsKey("serverInfo")) {
+                    Object serverInfo = resultMap.get("serverInfo");
+                    if (serverInfo instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> serverInfoMap = (Map<String, Object>) serverInfo;
+                        logger.debug("MCP serverInfo structure: {}", serverInfoMap.keySet());
+                        
+                        // Check various possible session key names
+                        for (String possibleKey : Arrays.asList("sessionId", "session_id", "id", "sessionUUID", "uuid")) {
+                            if (serverInfoMap.containsKey(possibleKey)) {
+                                Object value = serverInfoMap.get(possibleKey);
+                                if (value instanceof String) {
+                                    return (String) value;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // For the webcrawl-mcp server specifically - it might be using a specific format
+                // Identify if this is webcrawl-mcp
+                if (resultMap.containsKey("serverInfo")) {
+                    Object serverInfo = resultMap.get("serverInfo");
+                    if (serverInfo instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> serverInfoMap = (Map<String, Object>) serverInfo;
+                        String serverName = (String) serverInfoMap.get("name");
+                        if (serverName != null && serverName.toLowerCase().contains("webcrawl")) {
+                            // Special case for webcrawl-mcp which needs a specific session format
+                            return "webcrawl-" + UUID.randomUUID().toString();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If no session ID found in the response, use a UUID-based ID which has better chances
+        // of being accepted than a random number
+        return "session-" + UUID.randomUUID().toString();
+    }
+
+    /**
+     * Tests if a session ID is valid by making a simple tools/list request.
+     */
+    private boolean testSessionValidity(String url, String sessionId, McpServerConfig mcpConfig) {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("jsonrpc", "2.0");
+        requestBody.put("method", "tools/list");
+        requestBody.put("id", UUID.randomUUID().toString());  // dynamic request ID
         requestBody.put("params", new HashMap<>());
 
         HttpHeaders headers = new HttpHeaders();
@@ -683,21 +882,55 @@ public class DynamicIntegrationService {
         HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
 
         try {
-            restTemplate.postForObject(baseUrl, requestEntity, Map.class);
-            return true;
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = restTemplate.postForObject(url, requestEntity, Map.class);
+            
+            if (response != null) {
+                if (response.containsKey("result")) {
+                    logger.debug("Session validation successful for server: {}", mcpConfig.getName());
+                    return true;
+                } else if (response.containsKey("error")) {
+                    Object error = response.get("error");
+                    logger.warn("Session validation failed for server: {} - Error: {}", mcpConfig.getName(), error);
+                    return false;
+                }
+            }
         } catch (RestClientException e) {
-            logger.error("Failed to send initialized notification to MCP server {}: {}", mcpConfig.getName(), e.getMessage());
-            return false;
+            logger.warn("Session validation failed for server: {} - Exception: {}", mcpConfig.getName(), e.getMessage());
         }
+        
+        return false;
     }
 
     /**
-     * Extracts session ID from initialization response.
+     * Attempts alternate session setup approaches when standard session management fails.
      */
-    private String extractSessionId(Map<String, Object> response) {
-        // In a real implementation, this would extract from response headers
-        // For now, generate a simple session ID
-        return "session_" + System.currentTimeMillis();
+    private String attemptAlternateSessionSetup(String url, McpServerConfig mcpConfig) {
+        // Try different session ID formats
+        String[] sessionFormats = {
+            "mcp_session_" + System.currentTimeMillis(),
+            "session-" + System.currentTimeMillis(),
+            String.valueOf(System.currentTimeMillis()),
+            "client_" + System.currentTimeMillis()
+        };
+        
+        for (String sessionId : sessionFormats) {
+            logger.info("Trying alternate session format: {} for server: {}", sessionId, mcpConfig.getName());
+            if (testSessionValidity(url, sessionId, mcpConfig)) {
+                logger.info("Alternate session format successful: {} for server: {}", sessionId, mcpConfig.getName());
+                return sessionId;
+            }
+        }
+        
+        // Try without session ID (some MCP servers might not require it)
+        logger.info("Trying no session ID for server: {}", mcpConfig.getName());
+        if (testSessionValidity(url, null, mcpConfig)) {
+            logger.info("MCP server {} does not require session ID", mcpConfig.getName());
+            return "no_session_required";
+        }
+        
+        logger.error("All session setup approaches failed for server: {}", mcpConfig.getName());
+        return null;
     }
 
     public DynamicIntegrationService(IntegrationProperties integrationProperties, RestTemplateBuilder restTemplateBuilder) {

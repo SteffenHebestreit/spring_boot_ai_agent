@@ -27,6 +27,7 @@
 - ✅ Implemented proper session management with headers
 - ✅ Added capability negotiation with tools and resources support
 - ✅ Fixed JSON-RPC structure to include all required fields
+- ✅ Ensured robust session ID extraction from MCP `initialize` response body by correctly parsing JSON, resolving previous compilation and runtime issues.
 
 **Authentication Enhancements:**
 - **TokenWrapper Class** - Thread-safe token caching with 30-second expiry buffer
