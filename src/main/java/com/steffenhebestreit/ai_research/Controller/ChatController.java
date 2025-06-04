@@ -313,9 +313,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
                 // currentMsg.setTimestamp(java.time.LocalDateTime.now()); // Timestamp not strictly needed for LLM call
                 // currentMsg.setChat(chatService.getChatById(chatId).orElse(null)); // Chat association not strictly needed for LLM call
                 conversationHistory = List.of(currentMsg);
-            }
-
-            return openAIService.getChatCompletionStream(conversationHistory, modelToUse)
+            }            return openAIService.getChatCompletionStreamWithToolExecution(conversationHistory, modelToUse)
                     .doOnError(e -> logger.error("Error during AI stream for chat {}: {}", chatId, e.getMessage(), e))
                     .onErrorResume(e -> Flux.just("{\"error\": \"Error processing your request: " + e.getMessage().replace("\"", "\\\"") + "\"}")); // Send error as JSON
         } catch (Exception e) {

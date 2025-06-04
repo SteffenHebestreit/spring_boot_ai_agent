@@ -43,6 +43,8 @@ This project, "AI Research Project," is a Spring Boot application designed for A
   - Session management with proper MCP-Session-Id header handling
   - JSON-RPC 2.0 compliant request/response structure
   - Support for MCP specification version 2024-11-05
+  - **Tool execution workflow** - Complete tool calling from LLM through MCP servers
+  - **Real-time tool feedback** - Stream progress and results of tool execution
 - Peer-to-peer communication with other A2A (Agent-to-Agent) agents
 - RESTful APIs for interaction
 - Streaming capabilities for real-time data/task updates

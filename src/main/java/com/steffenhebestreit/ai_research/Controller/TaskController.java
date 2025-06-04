@@ -206,10 +206,8 @@ public class TaskController {
             List<ChatMessage> conversationHistory = chatService.getChatMessages(chat.getId());
             
             // StringBuilder to accumulate the response
-            StringBuilder responseAggregator = new StringBuilder();
-
-            // Get and return the streaming response
-            return openAIService.getChatCompletionStream(conversationHistory)
+            StringBuilder responseAggregator = new StringBuilder();            // Get and return the streaming response
+            return openAIService.getChatCompletionStreamWithToolExecution(conversationHistory, defaultLlmId)
                     .doOnNext(responseAggregator::append) // Append each chunk to the aggregator
                     .doOnComplete(() -> {
                         // Save the completed response to chat history

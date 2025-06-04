@@ -1,5 +1,67 @@
 # Changelog
 
+## [1.2.0] - 2025-01-28
+
+### Added - MCP Tool Integration and Enhanced Streaming
+
+#### 🚀 **MCP Tool Execution Integration**
+
+**Core Tool Execution:**
+- **Complete Tool Workflow** - Full MCP tool calling workflow from LLM to tool execution and back
+- **Reactive Tool Execution** - Enhanced streaming with tool call detection and execution 
+- **Tool Discovery Integration** - Automatic tool discovery from MCP servers and inclusion in LLM requests
+- **Tool Result Processing** - Proper handling and formatting of tool execution results
+
+**OpenAIService Enhancements:**
+- `getChatCompletionStreamWithToolExecution()` - New streaming method with full tool support
+- `executeStreamingConversationWithTools()` - Core tool execution workflow handler
+- `convertMcpToolsToOpenAIFormat()` - Tool format conversion for API compatibility
+- `executeToolCallFromNode()` - Individual tool call execution and result processing
+- `continueConversationAfterTools()` - Conversation continuation after tool completion
+
+**DynamicIntegrationService Tool Execution:**
+- `executeToolCall()` - Execute specific tools via MCP servers
+- `findServerForTool()` - Locate which MCP server provides a given tool
+- `findServerConfigByName()` - Server configuration lookup by name
+
+#### 🎯 **Streaming and Controller Updates**
+
+**Enhanced Streaming Support:**
+- **Tool-aware Streaming** - ChatController and TaskController now use tool-enabled streaming
+- **Real-time Tool Feedback** - Users see tool execution progress in real-time
+- **Error Resilience** - Robust error handling during tool execution workflows
+
+**Controller Updates:**
+- **ChatController** - Updated to use `getChatCompletionStreamWithToolExecution`
+- **TaskController** - Enhanced streaming chat with tool execution support
+- **Tool Execution Feedback** - Real-time progress indicators for tool calls
+
+#### 🔧 **Service Refactoring and Improvements**
+
+**ChatService Simplification:**
+- **Removed OpenAIService Dependency** - Eliminated circular dependency concerns
+- **Removed Message Summarization** - Simplified message handling workflow
+- **Constructor Simplification** - Cleaner dependency injection pattern
+
+**Testing Infrastructure:**
+- **OpenAIServiceMcpToolsTest** - Comprehensive test suite for MCP tool integration
+- **Tool Workflow Testing** - Test coverage for complete tool execution workflows
+- **Mock Integration Testing** - WebClient and service interaction testing
+
+#### 🏗️ **Architecture Improvements**
+
+**Reactive Architecture:**
+- **Flux-based Tool Execution** - Non-blocking tool execution workflows
+- **Stream Completion Management** - Proper stream lifecycle management with tool calls
+- **Concurrent Execution Prevention** - Thread-safe tool execution handling
+
+**Error Handling:**
+- **Tool Execution Errors** - Graceful handling of tool execution failures
+- **Stream Error Recovery** - Fallback responses for streaming failures
+- **Logging Enhancements** - Comprehensive logging for debugging tool workflows
+
+---
+
 ## [1.1.0] - 2025-06-03
 
 ### Added - MCP Compliance Implementation
