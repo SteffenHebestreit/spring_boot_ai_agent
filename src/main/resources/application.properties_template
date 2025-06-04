@@ -22,10 +22,10 @@ spring.h2.console.path=${SPRING_H2_CONSOLE_PATH:/h2-console}
 
 # External MCP Servers
 agent.integrations.mcp-servers[0].name=webcrawl-mcp
-agent.integrations.mcp-servers[0].url=http://localhost:3000
+agent.integrations.mcp-servers[0].url=http://webcrawl-mcp:3000
 
 # OpenAI API Configuration (MUST be overridden by environment variables for security)
-openai.api.baseurl=${OPENAI_API_BASEURL:http://192.168.12.10:1234/v1}
+openai.api.baseurl=${OPENAI_API_BASEURL:http://127.0.0.1:1234/v1}
 openai.api.key=${OPENAI_API_KEY:YOUR_OPENAI_API_KEY_HERE}
 openai.api.model=${OPENAI_API_MODEL:qwen_qwen3-14b}
 
