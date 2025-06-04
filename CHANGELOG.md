@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.4.0] - 2025-01-30 (Current)
+## [1.4.0] - 2025-06-04 (Current)
 
 ### Added - Advanced MCP Session Management & Webcrawl-MCP Compatibility
 
