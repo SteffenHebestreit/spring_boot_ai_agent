@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.steffenhebestreit.ai_research.Configuration.OpenAIProperties;
+import com.steffenhebestreit.ai_research.Model.LlmConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -64,11 +65,14 @@ public class OpenAIService {
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
     private final DynamicIntegrationService dynamicIntegrationService;
+    private final LlmCapabilityService llmCapabilityService;
 
     public OpenAIService(OpenAIProperties openAIProperties, WebClient.Builder webClientBuilder, 
-                         ObjectMapper objectMapper, DynamicIntegrationService dynamicIntegrationService) {
+                         ObjectMapper objectMapper, DynamicIntegrationService dynamicIntegrationService,
+                         LlmCapabilityService llmCapabilityService) {
         this.openAIProperties = openAIProperties;
         this.dynamicIntegrationService = dynamicIntegrationService;
+        this.llmCapabilityService = llmCapabilityService;
         // Ensure the base URL does not end with a slash if the request URIs start with a slash
         String baseUrl = openAIProperties.getBaseurl();
         if (baseUrl == null) {
@@ -277,6 +281,14 @@ public class OpenAIService {
         
         // Convert the multimodal content to the format expected by the API
         List<Map<String, Object>> messages = new ArrayList<>();
+        
+        // Add system message only if model supports multimodal content and content is actually multimodal
+        Map<String, Object> systemMessage = createMultimodalSystemMessage(llmId, multimodalContent);
+        if (systemMessage != null) {
+            messages.add(systemMessage);
+            logger.debug("Added multimodal system message for model: {}", llmId);
+        }
+        
         Map<String, Object> userMessage = new HashMap<>();
         userMessage.put("role", "user");
         userMessage.put("content", multimodalContent);
@@ -359,6 +371,14 @@ public class OpenAIService {
         
         // Convert the multimodal content to the format expected by the API
         List<Map<String, Object>> messages = new ArrayList<>();
+        
+        // Add system message only if model supports multimodal content and content is actually multimodal
+        Map<String, Object> systemMessage = createMultimodalSystemMessage(modelId, multimodalContent);
+        if (systemMessage != null) {
+            messages.add(systemMessage);
+            logger.debug("Added multimodal system message for streaming model: {}", modelId);
+        }
+        
         Map<String, Object> userMessage = new HashMap<>();
         userMessage.put("role", "user");
         userMessage.put("content", multimodalContent);
@@ -438,6 +458,115 @@ public class OpenAIService {
             logger.warn("Error parsing LLM API stream chunk: {}", e.getMessage());
         }
         return "";
+    }
+    
+    /**
+     * Creates an appropriate system message for multimodal content based on model capabilities and content type.
+     * Only adds system messages if the model supports vision/multimodal capabilities.
+     * 
+     * @param modelId The ID of the model to check capabilities for
+     * @param multimodalContent The content to analyze for type detection
+     * @return A system message map if appropriate, null if no system message needed
+     */
+    private Map<String, Object> createMultimodalSystemMessage(String modelId, Object multimodalContent) {
+        // Check if the model supports vision/multimodal content
+        LlmConfiguration llmConfig = llmCapabilityService.getLlmConfiguration(modelId);
+        if (llmConfig == null || (!llmConfig.isSupportsImage() && !llmConfig.isSupportsPdf())) {
+            // Model doesn't support multimodal content, no system message needed
+            return null;
+        }
+        
+        // Detect content type to tailor the system message
+        String contentType = detectContentType(multimodalContent);
+        String systemPrompt = createSystemPromptForContentType(contentType, llmConfig);
+        
+        if (systemPrompt == null) {
+            return null;
+        }
+        
+        Map<String, Object> systemMessage = new HashMap<>();
+        systemMessage.put("role", "system");
+        systemMessage.put("content", systemPrompt);
+        return systemMessage;
+    }
+    
+    /**
+     * Detects the type of content in multimodal input.
+     * 
+     * @param multimodalContent The content to analyze
+     * @return Content type: "image", "pdf", "text", or "mixed"
+     */
+    private String detectContentType(Object multimodalContent) {
+        if (multimodalContent instanceof Object[]) {
+            Object[] contentArray = (Object[]) multimodalContent;
+            boolean hasImage = false;
+            boolean hasPdf = false;
+            
+            for (Object item : contentArray) {
+                if (item instanceof Map) {
+                    Map<?, ?> itemMap = (Map<?, ?>) item;
+                    String type = (String) itemMap.get("type");
+                    
+                    if ("image_url".equals(type)) {
+                        hasImage = true;
+                    } else if (itemMap.containsKey("image_url")) {
+                        Object imageUrl = itemMap.get("image_url");
+                        if (imageUrl instanceof Map) {
+                            Map<?, ?> imageUrlMap = (Map<?, ?>) imageUrl;
+                            String url = (String) imageUrlMap.get("url");
+                            if (url != null && url.startsWith("data:application/pdf")) {
+                                hasPdf = true;
+                            } else if (url != null && url.startsWith("data:image/")) {
+                                hasImage = true;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (hasImage && hasPdf) return "mixed";
+            if (hasImage) return "image";
+            if (hasPdf) return "pdf";
+        }
+        
+        return "text";
+    }
+    
+    /**
+     * Creates an appropriate system prompt based on content type and model capabilities.
+     * 
+     * @param contentType The detected content type
+     * @param llmConfig The LLM configuration
+     * @return System prompt string or null if no special handling needed
+     */
+    private String createSystemPromptForContentType(String contentType, LlmConfiguration llmConfig) {
+        switch (contentType) {
+            case "image":
+                if (llmConfig.isSupportsImage()) {
+                    return "You are a vision-enabled AI assistant. When provided with images, focus on analyzing and describing the visual content directly. Provide detailed descriptions of what you can see in the image, including objects, people, text, scenes, colors, and any other relevant visual details. Only use tools if the user explicitly requests web crawling or additional information beyond what's visible in the image.";
+                }
+                break;
+                
+            case "pdf":
+                if (llmConfig.isSupportsPdf()) {
+                    return "You are an AI assistant capable of analyzing PDF documents. When provided with PDF content, focus on understanding and analyzing the document structure, text content, and any visual elements within the PDF. Provide comprehensive analysis of the document content. Only use tools if the user explicitly requests web crawling or additional information beyond what's in the document.";
+                }
+                break;
+                
+            case "mixed":
+                if (llmConfig.isSupportsImage() || llmConfig.isSupportsPdf()) {
+                    return "You are a multimodal AI assistant capable of analyzing both images and documents. When provided with visual or document content, focus on analyzing and describing the content directly. Provide detailed analysis of all provided materials. Only use tools if the user explicitly requests web crawling or additional information beyond what's provided in the content.";
+                }
+                break;
+                
+            case "text":
+            default:
+                // For text-only content, don't add a special system message
+                // Let the model use its normal behavior and tools as appropriate
+                return null;
+        }
+        
+        return null;
     }
     
     /**
