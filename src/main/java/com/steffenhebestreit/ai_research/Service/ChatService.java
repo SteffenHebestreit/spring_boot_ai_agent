@@ -5,7 +5,6 @@ import com.steffenhebestreit.ai_research.Model.ChatMessage;
 import com.steffenhebestreit.ai_research.Model.Message;
 import com.steffenhebestreit.ai_research.Repository.ChatMessageRepository;
 import com.steffenhebestreit.ai_research.Repository.ChatRepository;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -15,16 +14,13 @@ import java.util.Optional;
 
 @Service
 public class ChatService {
-
     private final ChatRepository chatRepository;
     private final ChatMessageRepository chatMessageRepository;
-    private final OpenAIService openAIService; // Inject OpenAIService
-
-    @Autowired
-    public ChatService(ChatRepository chatRepository, ChatMessageRepository chatMessageRepository, OpenAIService openAIService) {
+    // OpenAIService is no longer needed after removing summarization
+    
+    public ChatService(ChatRepository chatRepository, ChatMessageRepository chatMessageRepository) {
         this.chatRepository = chatRepository;
         this.chatMessageRepository = chatMessageRepository;
-        this.openAIService = openAIService; // Initialize OpenAIService
     }
 
     /**
@@ -60,16 +56,7 @@ public class ChatService {
      */    @Transactional
     public Chat addMessageToChat(String chatId, Message message) {
         return getChatById(chatId).map(chat -> {
-            ChatMessage chatMessage = ChatMessage.fromMessage(message);
-            
-            // Summarize if content is long enough and is a string
-            String contentAsString = message.getContentAsString();
-            if (contentAsString != null && contentAsString.length() > 200) { // Example threshold
-                String summary = openAIService.summarizeMessage(contentAsString);
-                if (summary != null && !summary.isEmpty()) {
-                    chatMessage.setSummary(summary);
-                }
-            }
+            ChatMessage chatMessage = ChatMessage.fromMessage(message);            // Message summarization has been removed
             
             chat.addMessage(chatMessage);
             

@@ -63,9 +63,12 @@ public class OpenAIService {
     private final OpenAIProperties openAIProperties;
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
+    private final DynamicIntegrationService dynamicIntegrationService;
 
-    public OpenAIService(OpenAIProperties openAIProperties, WebClient.Builder webClientBuilder, ObjectMapper objectMapper) {
+    public OpenAIService(OpenAIProperties openAIProperties, WebClient.Builder webClientBuilder, 
+                         ObjectMapper objectMapper, DynamicIntegrationService dynamicIntegrationService) {
         this.openAIProperties = openAIProperties;
+        this.dynamicIntegrationService = dynamicIntegrationService;
         // Ensure the base URL does not end with a slash if the request URIs start with a slash
         String baseUrl = openAIProperties.getBaseurl();
         if (baseUrl == null) {
@@ -106,6 +109,35 @@ public class OpenAIService {
         requestBody.put("model", modelId);
         requestBody.put("messages", messagesForLlm); // Use the full conversation history
         requestBody.put("stream", true);
+        
+        // Add discovered MCP tools to request
+        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        if (mcpTools != null && !mcpTools.isEmpty()) {
+            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
+            logger.info("Adding {} MCP tools to LLM request", formattedTools.size());
+            requestBody.put("tools", formattedTools);
+            
+            // Log first few tools for debugging if available
+            if (logger.isDebugEnabled() && formattedTools.size() > 0) {
+                int toolsToLog = Math.min(2, formattedTools.size());
+                for (int i = 0; i < toolsToLog; i++) {
+                    Map<String, Object> tool = formattedTools.get(i);
+                    Object type = tool.get("type");
+                    Object name = "unknown";
+                    
+                    // Safely extract function name if available
+                    if (tool.get("function") instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> functionMap = (Map<String, Object>) tool.get("function");
+                        name = functionMap.getOrDefault("name", "unnamed");
+                    }
+                    
+                    logger.debug("Tool #{}: Type: {}, Name: {}", i+1, type, name);
+                }
+            }
+        } else {
+            logger.debug("No MCP tools available to add to LLM request");
+        }
 
         String path = "/chat/completions";
 
@@ -176,6 +208,14 @@ public class OpenAIService {
         requestBodyMap.put("model", openAIProperties.getModel());
         requestBodyMap.put("messages", Collections.singletonList(messageMap));
         requestBodyMap.put("max_tokens", 150);
+        
+        // Add discovered MCP tools to request
+        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        if (mcpTools != null && !mcpTools.isEmpty()) {
+            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
+            logger.info("Adding {} MCP tools to non-streaming LLM request", formattedTools.size());
+            requestBodyMap.put("tools", formattedTools);
+        }
 
         org.springframework.http.HttpEntity<Map<String, Object>> entity = new org.springframework.http.HttpEntity<>(requestBodyMap, headers);
         String fullUrl = openAIProperties.getBaseurl() + "/chat/completions";
@@ -208,56 +248,6 @@ public class OpenAIService {
         return "Error: No response from AI.";
     }
 
-    @SuppressWarnings("unchecked")
-    public String summarizeMessage(String content) {
-        // Construct a prompt for summarization
-        String prompt = "Please summarize the following text for context in a longer conversation. Keep it concise, ideally under 50 words, capturing the main points:\n\n" + content;
-        
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(openAIProperties.getKey());
-
-        Map<String, Object> messageMap = new HashMap<>();
-        messageMap.put("role", "user");
-        messageMap.put("content", prompt);
-
-        Map<String, Object> requestBodyMap = new HashMap<>();
-        requestBodyMap.put("model", openAIProperties.getModel());
-        requestBodyMap.put("messages", Collections.singletonList(messageMap));
-        requestBodyMap.put("max_tokens", 75);
-        requestBodyMap.put("temperature", 0.5);
-
-        org.springframework.http.HttpEntity<Map<String, Object>> entity = new org.springframework.http.HttpEntity<>(requestBodyMap, headers);
-        String fullUrl = openAIProperties.getBaseurl() + "/chat/completions";
-        RestTemplate restTemplate = new RestTemplate();
-
-        try {
-            logger.info("Sending summarization request to LLM: {} with model: {}", fullUrl, openAIProperties.getModel());
-            ResponseEntity<Map<String, Object>> response = restTemplate.postForEntity(fullUrl, entity, (Class<Map<String,Object>>)(Class<?>)Map.class);
-
-            if (response.getStatusCode().is2xxSuccessful()) {
-                Map<String, Object> responseBody = response.getBody();
-                if (responseBody != null) { // Check if responseBody is not null
-                    List<Map<String, Object>> choices = (List<Map<String, Object>>) responseBody.get("choices");
-                    if (choices != null && !choices.isEmpty()) {
-                        Map<String, Object> firstChoice = choices.get(0);
-                        Map<String, String> messageContent = (Map<String, String>) firstChoice.get("message");
-                        if (messageContent != null && messageContent.get("content") != null) {
-                            return messageContent.get("content").trim();
-                        }
-                    }
-                } else {
-                     logger.warn("LLM API (summarization) returned successful status but null body.");
-                }
-            } else {
-                logger.error("Error from LLM API (summarization): {} - {}", response.getStatusCode(), response.getBody());
-            }
-        } catch (Exception e) {
-            logger.error("Exception while calling LLM API (summarization)", e);
-        }
-        return null; // Return null if summarization fails for any reason
-    }
-    
     /**
      * Gets a completion from a vision-enabled LLM using multimodal content (text + image/PDF).
      * <p>
@@ -296,6 +286,14 @@ public class OpenAIService {
         // For safety, set a reasonable maximum token limit
         requestBody.put("max_tokens", 2000);
         
+        // Add discovered MCP tools to request
+        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        if (mcpTools != null && !mcpTools.isEmpty()) {
+            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
+            logger.info("Adding {} MCP tools to multimodal LLM request", formattedTools.size());
+            requestBody.put("tools", formattedTools);
+        }
+
         try {
             // Build the URL
             String url = "/chat/completions";
@@ -370,6 +368,14 @@ public class OpenAIService {
         // For safety, set a reasonable maximum token limit
         requestBody.put("max_tokens", 2000);
         
+        // Add discovered MCP tools to request
+        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        if (mcpTools != null && !mcpTools.isEmpty()) {
+            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
+            logger.info("Adding {} MCP tools to streaming multimodal LLM request", formattedTools.size());
+            requestBody.put("tools", formattedTools);
+        }
+
         try {
             // Convert request body to JSON string for logging
             String requestJson = objectMapper.writeValueAsString(requestBody);
@@ -433,4 +439,660 @@ public class OpenAIService {
         }
         return "";
     }
+    
+    /**
+     * Converts MCP tools to the format expected by OpenAI API.
+     * 
+     * <p>This method transforms tools discovered from Model Context Protocol (MCP) servers
+     * into the format required by OpenAI-compatible APIs. The main transformation ensures 
+     * that all tools have the required "type": "function" field as expected by the API.
+     * 
+     * @param mcpTools The list of tools from the MCP server
+     * @return A list of tools in the format expected by OpenAI API
+     */
+    private List<Map<String, Object>> convertMcpToolsToOpenAIFormat(List<Map<String, Object>> mcpTools) {
+        if (mcpTools == null || mcpTools.isEmpty()) {
+            return Collections.emptyList();
+        }
+        
+        List<Map<String, Object>> openAiTools = new ArrayList<>();
+        
+        for (Map<String, Object> mcpTool : mcpTools) {
+            Map<String, Object> openAiTool = new HashMap<>();
+            
+            // Ensure the tool has the required "type": "function" field
+            openAiTool.put("type", "function");
+            
+            // If the MCP tool already has a function field, use it
+            if (mcpTool.containsKey("function")) {
+                openAiTool.put("function", mcpTool.get("function"));
+            } else {
+                // Create a function structure from the MCP tool properties
+                Map<String, Object> function = new HashMap<>();
+                
+                // Use the tool name as function name, or a default if not available
+                function.put("name", mcpTool.getOrDefault("name", 
+                        mcpTool.getOrDefault("id", "mcp_tool_" + openAiTools.size())));
+                
+                // Add description if available
+                if (mcpTool.containsKey("description")) {
+                    function.put("description", mcpTool.get("description"));
+                }
+                
+                // Add parameters if available
+                if (mcpTool.containsKey("parameters")) {
+                    function.put("parameters", mcpTool.get("parameters"));
+                }
+                
+                openAiTool.put("function", function);
+            }
+            
+            openAiTools.add(openAiTool);
+        }
+        
+        return openAiTools;
+    }
+    
+    /**
+     * Enhanced streaming method that handles tool calls and execution.
+     * 
+     * <p>This method extends the basic streaming functionality to support the complete
+     * tool calling workflow: detecting tool calls from LLM responses, executing them
+     * via MCP servers, and feeding results back to continue the conversation.</p>
+     * 
+     * @param conversationMessages The conversation history
+     * @param modelId The model to use for completions
+     * @return A Flux of strings containing the complete conversation including tool execution results
+     */
+    public Flux<String> getChatCompletionStreamWithToolExecution(
+            List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
+        
+        return Flux.create(sink -> {
+            List<com.steffenhebestreit.ai_research.Model.ChatMessage> workingMessages = new ArrayList<>(conversationMessages);
+            executeStreamingConversationWithTools(workingMessages, modelId, sink);
+        }, reactor.core.publisher.FluxSink.OverflowStrategy.BUFFER);
+    }
+    
+    /**
+     * Enhanced streaming method with tool execution using default model.
+     * 
+     * <p>Convenience method that uses the default model configured in properties.
+     * Equivalent to calling getChatCompletionStreamWithToolExecution(conversationMessages, defaultModel).</p>
+     * 
+     * @param conversationMessages The conversation history
+     * @return A Flux of strings containing the complete conversation including tool execution results
+     */
+    public Flux<String> getChatCompletionStreamWithToolExecution(
+            List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
+        return getChatCompletionStreamWithToolExecution(conversationMessages, openAIProperties.getModel());
+    }
+
+    /**
+     * Executes a complete streaming conversation with tool support.
+     * 
+     * @param messages The current conversation messages
+     * @param modelId The model to use
+     * @param sink The flux sink to emit results to
+     */
+    private void executeStreamingConversationWithTools(
+            List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
+            String modelId, 
+            reactor.core.publisher.FluxSink<String> sink) {
+        
+        // Track whether tool calls were detected to manage completion properly
+        final java.util.concurrent.atomic.AtomicBoolean toolCallsDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicBoolean streamCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress = new java.util.concurrent.atomic.AtomicBoolean(false);
+        
+        // Build messages for LLM
+        List<Map<String, Object>> messagesForLlm = new ArrayList<>();
+        for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : messages) {
+            Map<String, Object> llmMessage = new HashMap<>();
+            String role = msg.getRole();
+            if ("agent".equalsIgnoreCase(role)) {
+                role = "assistant";
+            }
+            llmMessage.put("role", role);
+            llmMessage.put("content", msg.getContent());
+            messagesForLlm.add(llmMessage);
+        }
+
+        if (messagesForLlm.isEmpty()) {
+            sink.error(new IllegalArgumentException("Cannot send an empty message list to LLM."));
+            return;
+        }
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", modelId);
+        requestBody.put("messages", messagesForLlm);
+        requestBody.put("stream", true);
+        
+        // Add MCP tools
+        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        if (mcpTools != null && !mcpTools.isEmpty()) {
+            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
+            logger.info("Adding {} MCP tools to LLM request for tool execution stream", formattedTools.size());
+            requestBody.put("tools", formattedTools);
+        }
+
+        String path = "/chat/completions";
+
+        webClient.post()
+                .uri(path)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(requestBody)
+                .retrieve()
+                .bodyToFlux(String.class)
+                .doOnNext(rawEvent -> {
+                    logger.debug("Raw streaming event: {}", rawEvent);
+                    // Also log if it contains tool_calls for easier debugging
+                    if (rawEvent.contains("tool_calls")) {
+                        logger.info("Raw event contains tool_calls: {}", rawEvent);
+                    }
+                })
+                .map(String::trim)
+                .filter(trimmedEvent -> !"[DONE]".equalsIgnoreCase(trimmedEvent))
+                .subscribe(
+                    jsonChunk -> {
+                        try {
+                            if ("[DONE]".equalsIgnoreCase(jsonChunk.trim())) {
+                                return;
+                            }
+                            
+                            JsonNode rootNode = objectMapper.readTree(jsonChunk);
+                            JsonNode choicesNode = rootNode.path("choices");
+                            if (choicesNode.isArray() && !choicesNode.isEmpty()) {
+                                JsonNode firstChoice = choicesNode.get(0);
+                                JsonNode deltaNode = firstChoice.path("delta");
+                                JsonNode finishReasonNode = firstChoice.path("finish_reason");
+                                
+                                // Check for tool calls in delta (for name detection)
+                                JsonNode toolCallsNode = deltaNode.path("tool_calls");
+                                if (toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
+                                    logger.info("Found tool calls in streaming delta: {}", toolCallsNode.toString());
+                                    for (JsonNode toolCallNode : toolCallsNode) {
+                                        JsonNode functionNode = toolCallNode.path("function");
+                                        if (!functionNode.isMissingNode()) {
+                                            JsonNode nameNode = functionNode.path("name");
+                                            if (nameNode.isTextual()) {
+                                                String toolName = nameNode.asText();
+                                                sink.next("[Calling tool: " + toolName + "] ");
+                                                logger.info("Detected tool call in stream: {}", toolName);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Regular content
+                                    JsonNode contentNode = deltaNode.path("content");
+                                    if (contentNode.isTextual()) {
+                                        sink.next(contentNode.asText());
+                                    }
+                                }
+                                
+                                // Check finish reason
+                                if (finishReasonNode.isTextual()) {
+                                    String finishReason = finishReasonNode.asText();
+                                    logger.info("Stream finished with reason: {}", finishReason);
+                                    
+                                    if ("tool_calls".equals(finishReason)) {
+                                        // Set flag and handle tool calls
+                                        toolCallsDetected.set(true);
+                                        streamCompleted.set(true);
+                                        
+                                        // Prevent concurrent tool execution
+                                        if (toolExecutionInProgress.compareAndSet(false, true)) {
+                                            sink.next("[Executing tools...]");
+                                            handleToolCallsCompletion(messages, modelId, sink, toolExecutionInProgress);
+                                        } else {
+                                            logger.warn("Tool execution already in progress, ignoring duplicate tool_calls finish reason");
+                                        }
+                                    } else if (!toolCallsDetected.get() && streamCompleted.compareAndSet(false, true)) {
+                                        // Only complete if no tool calls were detected and not already completed
+                                        logger.info("Completing sink after normal conversation");
+                                        sink.complete();
+                                    }
+                                }
+                            }
+                        } catch (JsonProcessingException e) {
+                            logger.error("Error parsing streaming JSON chunk: '{}'", jsonChunk, e);
+                        } catch (Exception e) {
+                            logger.error("Unexpected error processing streaming chunk: '{}'", jsonChunk, e);
+                        }
+                    },
+                    error -> {
+                        logger.error("Error in streaming response", error);
+                        sink.error(error);
+                    },
+                    () -> {
+                        // Only complete if no tool calls were detected and not already completed
+                        if (!toolCallsDetected.get() && streamCompleted.compareAndSet(false, true)) {
+                            logger.info("Streaming completed without tool calls");
+                            sink.complete();
+                        } else {
+                            logger.debug("Streaming completed - tool calls handler will manage completion or already completed");
+                        }
+                    }
+                );
+    }    
+    /**
+     * Processes tool call delta from streaming response.
+     */
+    private void processToolCallDelta(JsonNode toolCallsNode, reactor.core.publisher.FluxSink<String> sink) {
+        for (JsonNode toolCallNode : toolCallsNode) {
+            JsonNode functionNode = toolCallNode.path("function");
+            if (!functionNode.isMissingNode()) {
+                JsonNode nameNode = functionNode.path("name");
+                JsonNode argsNode = functionNode.path("arguments");
+                
+                if (nameNode.isTextual()) {
+                    String toolName = nameNode.asText();
+                    sink.next("\n[Calling tool: " + toolName + "]");
+                }
+                
+                if (argsNode.isTextual()) {
+                    // Tool arguments are being streamed
+                    // For now, just indicate that tool call is in progress
+                    // We'll collect the full arguments when the stream completes
+                }
+            }
+        }
+    }
+    
+    /**
+     * Handles completion of tool calls and continues the conversation.
+     */
+    private void handleToolCallsCompletion(
+            List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
+            String modelId, 
+            reactor.core.publisher.FluxSink<String> sink,
+            java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
+        
+        // Use reactive approach to avoid blocking in reactive context
+        getChatCompletionForToolCallsReactive(messages, modelId)
+            .subscribe(
+                toolCallsResponse -> {
+                    try {
+                        // Parse the response to extract tool calls
+                        JsonNode responseNode = objectMapper.readTree(toolCallsResponse);
+                        JsonNode choicesNode = responseNode.path("choices");
+                        if (choicesNode.isArray() && !choicesNode.isEmpty()) {
+                            JsonNode firstChoice = choicesNode.get(0);
+                            JsonNode messageNode = firstChoice.path("message");
+                            JsonNode toolCallsNode = messageNode.path("tool_calls");
+                            
+                            if (toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
+                                // Execute each tool call
+                                for (JsonNode toolCallNode : toolCallsNode) {
+                                    executeToolCallFromNode(toolCallNode, messages, sink);
+                                }
+                                
+                                // Continue conversation with tool results
+                                sink.next("\n[Continuing conversation with tool results...]\n");
+                                
+                                // Continue the conversation within the same reactive context
+                                continueConversationAfterTools(messages, modelId, sink, toolExecutionInProgress);
+                                return;
+                            }
+                        }
+                        
+                        // No tool calls found, complete the conversation with a small delay
+                        logger.info("No tool calls found in response, completing stream with delay");
+                        // Reset tool execution flag since we're completing
+                        toolExecutionInProgress.set(false);
+                        reactor.core.scheduler.Schedulers.single().schedule(() -> {
+                            sink.complete();
+                        }, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        
+                    } catch (Exception e) {
+                        logger.error("Error parsing tool calls response", e);
+                        // Reset tool execution flag since we're completing with error
+                        toolExecutionInProgress.set(false);
+                        sink.error(e);
+                    }
+                },
+                error -> {
+                    logger.error("Error handling tool calls completion", error);
+                    // Reset tool execution flag since we're completing with error
+                    toolExecutionInProgress.set(false);
+                    sink.error(error);
+                }
+            );
+    }
+    
+    /**
+     * Executes a single tool call and adds the result to the conversation.
+     */
+    private void executeToolCallFromNode(JsonNode toolCallNode, 
+                                List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages,
+                                reactor.core.publisher.FluxSink<String> sink) {
+        try {
+            String toolCallId = toolCallNode.path("id").asText();
+            JsonNode functionNode = toolCallNode.path("function");
+            String toolName = functionNode.path("name").asText();
+            String argumentsJson = functionNode.path("arguments").asText();
+            
+            sink.next("\n[Executing: " + toolName + "]");
+            logger.info("Executing tool call: {} with ID: {}", toolName, toolCallId);
+            
+            // Parse arguments
+            Map<String, Object> arguments = new HashMap<>();
+            if (argumentsJson != null && !argumentsJson.trim().isEmpty()) {
+                try {
+                    arguments = objectMapper.readValue(argumentsJson, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                } catch (JsonProcessingException e) {
+                    logger.error("Error parsing tool arguments: {}", argumentsJson, e);
+                }
+            }
+            
+            // Execute the tool via MCP
+            Map<String, Object> toolResult = dynamicIntegrationService.executeToolCall(toolName, arguments);
+            
+            // Add assistant message with tool call to conversation
+            com.steffenhebestreit.ai_research.Model.ChatMessage assistantMessage = 
+                new com.steffenhebestreit.ai_research.Model.ChatMessage();
+            assistantMessage.setRole("assistant");
+            assistantMessage.setContent(null); // No text content for tool call message
+            // Note: In a complete implementation, we'd store tool call data as JSON
+            // For now, we'll represent it as a message without content
+            messages.add(assistantMessage);
+            
+            // Add tool result as a tool message
+            com.steffenhebestreit.ai_research.Model.ChatMessage toolMessage = 
+                new com.steffenhebestreit.ai_research.Model.ChatMessage();
+            toolMessage.setRole("tool");
+            
+            String resultContent;
+            if (toolResult != null) {
+                if (toolResult.containsKey("error")) {
+                    resultContent = "Error: " + toolResult.get("error").toString();
+                    sink.next("\n[Tool error: " + toolResult.get("error") + "]");
+                    logger.error("Tool execution error: {}", toolResult.get("error"));
+                } else if (toolResult.containsKey("result")) {
+                    resultContent = objectMapper.writeValueAsString(toolResult.get("result"));
+                    sink.next("\n[Tool completed successfully]");
+                    logger.info("Tool executed successfully, result size: {} chars", resultContent.length());
+                } else {
+                    resultContent = objectMapper.writeValueAsString(toolResult);
+                    sink.next("\n[Tool completed]");
+                    logger.info("Tool completed, result size: {} chars", resultContent.length());
+                }
+            } else {
+                resultContent = "Tool execution failed";
+                sink.next("\n[Tool execution failed]");
+                logger.error("Tool execution returned null result");
+            }
+            
+            toolMessage.setContent(resultContent);
+            messages.add(toolMessage);
+            
+            logger.info("Added tool result to conversation. Message count now: {}", messages.size());
+            
+        } catch (Exception e) {
+            logger.error("Error executing tool call", e);
+            sink.next("\n[Tool execution error: " + e.getMessage() + "]");
+        }
+    }
+    
+    /**
+     * Reactive version to get complete response including tool calls.
+     */
+    private reactor.core.publisher.Mono<String> getChatCompletionForToolCallsReactive(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
+        List<Map<String, Object>> messagesForLlm = new ArrayList<>();
+        for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : conversationMessages) {
+            Map<String, Object> llmMessage = new HashMap<>();
+            String role = msg.getRole();
+            if ("agent".equalsIgnoreCase(role)) {
+                role = "assistant";
+            }
+            llmMessage.put("role", role);
+            llmMessage.put("content", msg.getContent());
+            messagesForLlm.add(llmMessage);
+        }
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", modelId);
+        requestBody.put("messages", messagesForLlm);
+        requestBody.put("stream", false);
+        
+        // Add MCP tools
+        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        if (mcpTools != null && !mcpTools.isEmpty()) {
+            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
+            requestBody.put("tools", formattedTools);
+        }
+
+        String path = "/chat/completions";
+        
+        return webClient.post()
+                .uri(path)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(requestBody)
+                .retrieve()
+                .bodyToMono(String.class)
+                .doOnError(e -> logger.error("Error making reactive non-streaming completion request", e));
+    }
+    
+    /**
+     * Continues the conversation after tool execution within the same reactive context.
+     */
+    private void continueConversationAfterTools(
+            List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
+            String modelId, 
+            reactor.core.publisher.FluxSink<String> sink,
+            java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
+        
+        // Build messages for LLM including the tool results
+        List<Map<String, Object>> messagesForLlm = new ArrayList<>();
+        for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : messages) {
+            Map<String, Object> llmMessage = new HashMap<>();
+            String role = msg.getRole();
+            if ("agent".equalsIgnoreCase(role)) {
+                role = "assistant";
+            }
+            llmMessage.put("role", role);
+            
+            // Handle content - ensure it's not null and reasonable
+            String content = msg.getContent();
+            if (content == null) {
+                if ("assistant".equals(role)) {
+                    // Skip assistant messages with null content as they likely had tool calls
+                    // that we can't properly represent in this simplified format
+                    logger.debug("Skipping assistant message with null content");
+                    continue;
+                } else {
+                    content = "";
+                }
+            }
+            
+            // Limit content size for tool messages to prevent overwhelming the LLM
+            if ("tool".equals(role) && content.length() > 3000) {
+                content = content.substring(0, 3000) + "... [content truncated]";
+                logger.debug("Truncated tool result content from {} to 3000 chars", content.length());
+            }
+            
+            llmMessage.put("content", content);
+            messagesForLlm.add(llmMessage);
+        }
+        
+        logger.info("Built {} messages for continuation request (after filtering)", messagesForLlm.size());
+        
+        // Debug log the message structure
+        if (logger.isDebugEnabled()) {
+            for (int i = 0; i < messagesForLlm.size(); i++) {
+                Map<String, Object> msg = messagesForLlm.get(i);
+                String content = (String) msg.get("content");
+                int contentLength = content != null ? content.length() : 0;
+                logger.debug("Continuation message {}: role={}, content_length={}", 
+                    i, msg.get("role"), contentLength);
+            }
+        }
+        
+        // Ensure we have valid messages for continuation
+        if (messagesForLlm.isEmpty()) {
+            logger.warn("No valid messages for continuation request after filtering. Completing stream.");
+            sink.next("\n[Tool execution completed successfully]");
+            sink.complete();
+            return;
+        }
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", modelId);
+        requestBody.put("messages", messagesForLlm);
+        requestBody.put("stream", true);
+        
+        // Add MCP tools for potential future tool calls
+        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        if (mcpTools != null && !mcpTools.isEmpty()) {
+            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
+            logger.info("Adding {} MCP tools to continuation request", formattedTools.size());
+            requestBody.put("tools", formattedTools);
+        }
+
+        String path = "/chat/completions";
+
+        // Track if stream has been completed to prevent multiple completion calls
+        final java.util.concurrent.atomic.AtomicBoolean streamCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
+        // Track the subscription so we can cancel it if needed
+        final java.util.concurrent.atomic.AtomicReference<reactor.core.Disposable> subscriptionRef = new java.util.concurrent.atomic.AtomicReference<>();
+        
+        // Make a new streaming request for the continuation and properly connect it to the sink
+        reactor.core.Disposable subscription = webClient.post()
+                .uri(path)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(requestBody)
+                .retrieve()
+                .bodyToFlux(String.class)
+                .doOnNext(rawEvent -> logger.debug("Raw continuation event: {}", rawEvent))
+                .map(String::trim)
+                .filter(trimmedEvent -> !"[DONE]".equalsIgnoreCase(trimmedEvent))
+                .retryWhen(reactor.util.retry.Retry.backoff(2, java.time.Duration.ofSeconds(1))
+                        .doBeforeRetry(retrySignal -> 
+                            logger.warn("Retrying continuation request (attempt {}): {}", 
+                                retrySignal.totalRetries() + 1, retrySignal.failure().getMessage())))
+                // Add delay before completion to ensure content is fully transmitted
+                .doOnComplete(() -> {
+                    logger.info("CONTINUATION: Raw stream completed, scheduling sink completion after delay");
+                    // Reset tool execution flag since we're completing
+                    toolExecutionInProgress.set(false);
+                    // Use a scheduler to add a small delay before completing
+                    reactor.core.scheduler.Schedulers.single().schedule(() -> {
+                        if (streamCompleted.compareAndSet(false, true)) {
+                            logger.info("CONTINUATION: Completing sink after stream completion delay");
+                            sink.complete();
+                        }
+                    }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                })
+                .subscribe(
+                    jsonChunk -> {
+                        try {
+                            if ("[DONE]".equalsIgnoreCase(jsonChunk.trim())) {
+                                logger.info("CONTINUATION: Received [DONE] marker");
+                                return;
+                            }
+                            
+                            logger.debug("CONTINUATION: Processing chunk: {}", jsonChunk);
+                            
+                            JsonNode rootNode = objectMapper.readTree(jsonChunk);
+                            JsonNode choicesNode = rootNode.path("choices");
+                            if (choicesNode.isArray() && !choicesNode.isEmpty()) {
+                                JsonNode firstChoice = choicesNode.get(0);
+                                JsonNode deltaNode = firstChoice.path("delta");
+                                JsonNode finishReasonNode = firstChoice.path("finish_reason");
+                                
+                                logger.debug("CONTINUATION: Delta: {}, Finish reason: {}", 
+                                    deltaNode.toString(), 
+                                    finishReasonNode.isTextual() ? finishReasonNode.asText() : "null");
+                                
+                                // Check for tool calls in delta (potential recursive tool calls)
+                                JsonNode toolCallsNode = deltaNode.path("tool_calls");
+                                if (toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
+                                    // Process tool call data
+                                    logger.info("CONTINUATION: Found recursive tool calls");
+                                    processToolCallDelta(toolCallsNode, sink);
+                                } else {
+                                    // Regular content - this is what we want to stream to frontend
+                                    JsonNode contentNode = deltaNode.path("content");
+                                    if (contentNode.isTextual()) {
+                                        String content = contentNode.asText();
+                                        logger.info("CONTINUATION: Emitting content to frontend: '{}'", content);
+                                        sink.next(content);
+                                    } else {
+                                        // Log when there's no content in the delta
+                                        logger.debug("CONTINUATION: Delta has no content node. Delta: {}", deltaNode);
+                                    }
+                                }
+                                
+                                // Check finish reason - but don't complete immediately
+                                if (finishReasonNode.isTextual()) {
+                                    String finishReason = finishReasonNode.asText();
+                                    logger.info("CONTINUATION: Stream finished with reason: '{}'", finishReason);
+                                    
+                                    if ("tool_calls".equals(finishReason)) {
+                                        // Handle nested tool calls
+                                        logger.info("CONTINUATION: Handling nested tool calls");
+                                        
+                                        // Prevent concurrent tool execution
+                                        if (toolExecutionInProgress.compareAndSet(false, true)) {
+                                            if (streamCompleted.compareAndSet(false, true)) {
+                                                // Cancel the current subscription to prevent completion handlers from running
+                                                reactor.core.Disposable currentSub = subscriptionRef.get();
+                                                if (currentSub != null && !currentSub.isDisposed()) {
+                                                    currentSub.dispose();
+                                                }
+                                                handleToolCallsCompletion(messages, modelId, sink, toolExecutionInProgress);
+                                            }
+                                        } else {
+                                            logger.warn("CONTINUATION: Tool execution already in progress, ignoring nested tool calls and canceling stream");
+                                            // Cancel the subscription since we're ignoring nested tool calls
+                                            if (streamCompleted.compareAndSet(false, true)) {
+                                                reactor.core.Disposable currentSub = subscriptionRef.get();
+                                                if (currentSub != null && !currentSub.isDisposed()) {
+                                                    currentSub.dispose();
+                                                }
+                                            }
+                                            return;
+                                        }
+                                        return;
+                                    }
+                                    // For normal completion, let the doOnComplete handler manage it with delay
+                                } else {
+                                    logger.debug("CONTINUATION: No finish reason in this chunk");
+                                }
+                            }
+                        } catch (JsonProcessingException e) {
+                            logger.error("Error parsing continuation JSON chunk: '{}'", jsonChunk, e);
+                            if (streamCompleted.compareAndSet(false, true)) {
+                                sink.error(e);
+                            }
+                        } catch (Exception e) {
+                            logger.error("Unexpected error processing continuation chunk: '{}'", jsonChunk, e);
+                            if (streamCompleted.compareAndSet(false, true)) {
+                                sink.error(e);
+                            }
+                        }
+                    },
+                    error -> {
+                        logger.error("Error in continuation streaming response after retries", error);
+                        
+                        // Reset tool execution flag since we're completing with error
+                        toolExecutionInProgress.set(false);
+                        
+                        if (streamCompleted.compareAndSet(false, true)) {
+                            // Provide a fallback response instead of failing completely
+                            sink.next("\n\n[Tool execution completed successfully, but continuation response failed. ");
+                            sink.next("Tool results were processed. ");
+                            sink.next("Connection issue with LLM server: " + error.getMessage() + "]");
+                            sink.complete();
+                        }
+                    }
+                );
+        
+        // Store the subscription reference so we can cancel it if needed
+        subscriptionRef.set(subscription);
+    }
+
+    // ...existing code...
 }

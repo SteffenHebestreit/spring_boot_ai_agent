@@ -950,4 +950,126 @@ public class DynamicIntegrationService {
         logger.info("Initializing dynamic integrations...");
         refreshDynamicCapabilities();
     }
+    
+    /**
+     * Executes a tool call via MCP server.
+     * 
+     * <p>Executes a specific tool on the MCP server that originally provided it,
+     * using JSON-RPC 2.0 protocol with proper session management and authentication.</p>
+     * 
+     * @param toolName The name of the tool to execute
+     * @param parameters The parameters to pass to the tool
+     * @return The result of the tool execution, or null if execution failed
+     */
+    public Map<String, Object> executeToolCall(String toolName, Map<String, Object> parameters) {
+        // Find which MCP server provides this tool
+        McpServerConfig serverConfig = findServerForTool(toolName);
+        if (serverConfig == null) {
+            logger.error("No MCP server found that provides tool: {}", toolName);
+            return null;
+        }
+        
+        // Initialize session if needed
+        String sessionId = initializeMcpSession(serverConfig);
+        if (sessionId == null) {
+            logger.error("Failed to initialize MCP session for tool execution: {}", toolName);
+            return null;
+        }
+        
+        String baseUrl = sanitizeUrl(serverConfig.getUrl());
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            logger.error("Invalid URL for MCP server providing tool: {}", toolName);
+            return null;
+        }
+        
+        String mcpEndpointUrl = baseUrl + (baseUrl.endsWith("/") ? "mcp" : "/mcp");
+        
+        // Create JSON-RPC request for tool execution
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("jsonrpc", "2.0");
+        requestBody.put("id", UUID.randomUUID().toString());
+        requestBody.put("method", "tools/call");
+        
+        Map<String, Object> params = new HashMap<>();
+        params.put("name", toolName);
+        params.put("arguments", parameters != null ? parameters : new HashMap<>());
+        requestBody.put("params", params);
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        
+        // Add session ID header
+        if (sessionId != null && !"no_session_required".equals(sessionId)) {
+            headers.set("Mcp-Session-Id", sessionId);
+        }
+        
+        // Add authentication if configured
+        Optional<String> token = getAuthToken(serverConfig.getAuth(), serverConfig.getName());
+        token.ifPresent(headers::setBearerAuth);
+        
+        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+        
+        try {
+            logger.info("Executing tool '{}' on MCP server: {} with parameters: {}", 
+                       toolName, serverConfig.getName(), parameters);
+            
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = restTemplate.postForObject(mcpEndpointUrl, requestEntity, Map.class);
+            
+            if (response != null && response.containsKey("result")) {
+                logger.info("Tool '{}' executed successfully on server: {}", toolName, serverConfig.getName());
+                return response;
+            } else if (response != null && response.containsKey("error")) {
+                logger.error("Tool execution failed for '{}' on server: {}. Error: {}", 
+                           toolName, serverConfig.getName(), response.get("error"));
+                return response; // Return error response for proper handling
+            } else {
+                logger.error("Invalid response from tool execution for '{}' on server: {}. Response: {}", 
+                           toolName, serverConfig.getName(), response);
+                return null;
+            }
+        } catch (RestClientException e) {
+            logger.error("RestClientException while executing tool '{}' on server {}: {}. URL: {}", 
+                        toolName, serverConfig.getName(), e.getMessage(), mcpEndpointUrl, e);
+            return null;
+        }
+    }
+    
+    /**
+     * Finds the MCP server configuration that provides a specific tool.
+     * 
+     * @param toolName The name of the tool to find
+     * @return The McpServerConfig that provides the tool, or null if not found
+     */
+    private McpServerConfig findServerForTool(String toolName) {
+        // Check discovered tools to find which server provides this tool
+        for (Map<String, Object> tool : discoveredMcpTools) {
+            Object nameObj = tool.get("name");
+            if (nameObj instanceof String && toolName.equals(nameObj)) {
+                // Tool found, now find the server config
+                Object sourceServerName = tool.get("sourceMcpServerName");
+                if (sourceServerName instanceof String) {
+                    return findServerConfigByName((String) sourceServerName);
+                }
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Finds MCP server configuration by name.
+     * 
+     * @param serverName The name of the server to find
+     * @return The McpServerConfig with the given name, or null if not found
+     */
+    private McpServerConfig findServerConfigByName(String serverName) {
+        if (integrationProperties.getMcpServers() != null) {
+            for (McpServerConfig config : integrationProperties.getMcpServers()) {
+                if (serverName.equals(config.getName())) {
+                    return config;
+                }
+            }
+        }
+        return null;
+    }
 }
