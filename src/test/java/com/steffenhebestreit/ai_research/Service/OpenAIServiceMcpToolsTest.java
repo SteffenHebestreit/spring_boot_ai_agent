@@ -44,9 +44,11 @@ public class OpenAIServiceMcpToolsTest {
     
     @Mock
     private WebClient.ResponseSpec responseSpec;
+      @Mock
+    private DynamicIntegrationService dynamicIntegrationService;
     
     @Mock
-    private DynamicIntegrationService dynamicIntegrationService;
+    private LlmCapabilityService llmCapabilityService;
     
     private ObjectMapper objectMapper = new ObjectMapper();
     
@@ -70,9 +72,8 @@ public class OpenAIServiceMcpToolsTest {
         when(openAIProperties.getBaseurl()).thenReturn("http://test-api.local");
         when(openAIProperties.getKey()).thenReturn("test-api-key");
         when(openAIProperties.getModel()).thenReturn("test-model");
-        
-        // Initialize service with mocks
-        openAIService = new OpenAIService(openAIProperties, webClientBuilder, objectMapper, dynamicIntegrationService);
+          // Initialize service with mocks
+        openAIService = new OpenAIService(openAIProperties, webClientBuilder, objectMapper, dynamicIntegrationService, llmCapabilityService);
     }
     
     @Test
