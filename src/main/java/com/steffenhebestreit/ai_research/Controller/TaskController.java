@@ -7,6 +7,7 @@ import com.steffenhebestreit.ai_research.Model.Task;
 import com.steffenhebestreit.ai_research.Service.ChatService;
 import com.steffenhebestreit.ai_research.Service.OpenAIService;
 import com.steffenhebestreit.ai_research.Service.TaskService;
+import com.steffenhebestreit.ai_research.Util.ContentFilterUtil;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -204,9 +205,10 @@ public class TaskController {
             
             // Get the conversation history (which will have the user message we just added)
             List<ChatMessage> conversationHistory = chatService.getChatMessages(chat.getId());
+              // StringBuilder to accumulate the response
+            StringBuilder responseAggregator = new StringBuilder();
             
-            // StringBuilder to accumulate the response
-            StringBuilder responseAggregator = new StringBuilder();            // Get and return the streaming response
+            // Get and return the streaming response
             return openAIService.getChatCompletionStreamWithToolExecution(conversationHistory, defaultLlmId)
                     .doOnNext(responseAggregator::append) // Append each chunk to the aggregator
                     .doOnComplete(() -> {
@@ -214,7 +216,9 @@ public class TaskController {
                         try {
                             String fullResponse = responseAggregator.toString();
                             if (chat != null && !fullResponse.isEmpty()) { // Check chat != null
-                                Message agentMsg = new Message("agent", "text/plain", fullResponse);
+                                // Filter out <think> tags and ensure content fits within database constraints
+                                String filteredResponse = ContentFilterUtil.filterForDatabase(fullResponse);
+                                Message agentMsg = new Message("agent", "text/plain", filteredResponse);
                                 chatService.addMessageToChat(chat.getId(), agentMsg);
                             }
                         } catch (Exception e) {

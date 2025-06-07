@@ -33,3 +33,51 @@ The following changes were made to support this feature:
 3. Added a model selection parameter to the streaming functionality
 
 These changes allow the application to respect the frontend's model selection when processing streaming requests, ensuring the specified model is used rather than always defaulting to the configuration value.
+
+## Empty Response Handling Improvement
+
+The chat streaming functionality has been enhanced to handle empty AI responses more gracefully:
+
+### Enhanced Error Handling for Tool-Only Responses
+
+* **Description**: When an AI's response consists solely of tool-related content that gets filtered out, the backend now sends a clear error message to the frontend instead of silently not saving the empty message.
+* **Technical Implementation**:
+  * The streaming endpoint now checks if a response is empty after filtering out tool-related content
+  * If empty (but originally contained content), an error message is sent to the frontend: `{"error": "AI response was empty after filtering tool-related content."}`
+  * This prevents confusion when all AI content is tool-related and provides clearer feedback to users
+
+**Example Error Response**:
+```json
+{"error": "AI response was empty after filtering tool-related content."}
+```
+
+This improvement helps the frontend handle cases where the AI's response contains only tool calls or tool execution status messages, providing a better user experience.
+
+## System Message Handling Change
+
+The system message (AI role definition) is now handled differently:
+
+### Non-Persistent System Messages
+
+* **Description**: The system message defining the AI's role and current time is no longer saved to the database as part of the chat history.
+* **Technical Implementation**:
+  * Removed from `ChatService.createChat()` to prevent storage in the database
+  * Now dynamically prepended by `OpenAIService` before each LLM call
+  * Includes the current timestamp for temporal context
+  * This change reduces database storage needs and keeps system messages as transient instructions
+
+This update maintains the same AI behavior while improving database efficiency by not storing identical system messages in every chat.
+
+## Message Model Enhancement
+
+The `Message` model has been enhanced to support tracking which LLM generated each response:
+
+### LLM ID Tracking
+
+* **Description**: The `Message` class now includes an `llmId` field to store the identifier of the language model that generated each agent message.
+* **Technical Implementation**:
+  * Added `llmId` field with getter/setter to the `Message` class
+  * `ChatController` now sets this field when saving agent responses
+  * Enables tracking which model generated which response for analysis and comparison
+
+This enhancement allows for better attribution and analysis of responses from different language models.

@@ -39,12 +39,15 @@ This project, "AI Research Project," is a Spring Boot application designed for A
 - **Multimodal content support** for processing images and PDFs with vision-enabled LLMs
 - **Capability detection** for automatically identifying which models support which content types
 - **100% MCP-compliant integration** with external Model Context Protocol servers
+- **Robust chat functionality** with automatic message persistence and duplicate prevention
   - Full protocol handshake with initialization and capability negotiation
   - Session management with proper MCP-Session-Id header handling
   - JSON-RPC 2.0 compliant request/response structure
   - Support for MCP specification version 2024-11-05
   - **Tool execution workflow** - Complete tool calling from LLM through MCP servers
   - **Real-time tool feedback** - Stream progress and results of tool execution
+  - **Enhanced error handling** - Provides clear error messages for empty responses after tool calls
+  - **Non-persistent system prompts** - System messages are dynamically added by the AI service rather than stored in chat history
 - Peer-to-peer communication with other A2A (Agent-to-Agent) agents
 - RESTful APIs for interaction
 - Streaming capabilities for real-time data/task updates
@@ -630,7 +633,30 @@ The application supports processing multimodal content (text + images/PDFs) with
 - Support for both synchronous and streaming multimodal processing
 - Model-specific request routing through query parameters
 
-For detailed technical information, see the [Multimodal Content Support](docs/multimodal-content-support.md) and [Chat Controller Updates](docs/chat-controller-updates.md) documentation.
+For detailed technical information, see the [Multimodal Content Support](docs/multimodal-content-support.md), [Chat Controller Updates](docs/chat-controller-updates.md), and [Chat Message Flow Fix](docs/chat-message-flow-fix.md) documentation.
+
+### Chat Message Flow Fix
+
+The application includes a robust solution for chat message persistence issues:
+
+- **Auto-saving User Messages**: Backend automatically saves user messages sent to streaming endpoint
+- **Enhanced Duplicate Detection**: Prevents duplicate messages using both exact and substring matching
+- **Flexible API Usage**: Supports multiple frontend integration patterns for maximum compatibility
+- **Transaction Management**: Reliable message persistence with explicit transaction boundaries
+- **Comprehensive Testing**: Thorough test coverage of all message flow scenarios
+
+**Key Features:**
+- Backend resilience to frontend API call sequence variations
+- Intelligent duplicate detection for AI responses to prevent duplication
+- Detailed logging and error handling for troubleshooting
+- Compatible with existing frontend implementations
+- Complete conversation preservation regardless of API usage pattern
+
+For detailed technical information, see:
+- [Chat Message Flow Fix](docs/chat-message-flow-fix.md) - Overview of the fix
+- [Technical Chat Message Flow Fix](docs/technical-chat-message-flow-fix.md) - Detailed implementation
+- [Chat Message Flow Testing Guide](docs/chat-message-flow-testing-guide.md) - Verification steps
+- [Chat Message Flow Changes Summary](docs/chat-message-flow-changes-summary.md) - Complete change list
 
 ### API Documentation
 

@@ -176,13 +176,46 @@ public class OpenAIProperties {
 
     public void setKey(String key) {
         this.key = key;
-    }
-
-    public String getModel() {
+    }    public String getModel() {
         return model;
     }
 
     public void setModel(String model) {
         this.model = model;
+    }
+    
+    /**
+     * System role description for the LLM to set its behavior in conversations.
+     * 
+     * <p>Defines the persona and operational parameters for the language model
+     * in all chat interactions. This system message is included at the beginning
+     * of each new chat to establish consistent behavior across conversations.</p>
+     * 
+     * <h3>Role Configuration Effects:</h3>
+     * <ul>
+     * <li><strong>Persona Definition:</strong> Sets the AI's tone, style, and character</li>
+     * <li><strong>Operational Constraints:</strong> Defines behavioral guidelines and limitations</li>
+     * <li><strong>Knowledge Domain:</strong> Establishes the AI's area of expertise</li>
+     * <li><strong>Response Format:</strong> Can specify preferred output structures</li>
+     * </ul>
+     * 
+     * <h3>Example Values:</h3>
+     * <ul>
+     * <li>"You are a helpful research assistant specializing in scientific literature analysis."</li>
+     * <li>"You are a concise technical advisor who provides factual code examples."</li>
+     * <li>"You are a creative writing partner who helps develop storylines and characters."</li>
+     * </ul>
+     * 
+     * <h3>Default Behavior:</h3>
+     * <p>If not specified, a generic helpful assistant role is used.</p>
+     */
+    private String systemRole = "You are a helpful research assistant.";
+    
+    public String getSystemRole() {
+        return systemRole;
+    }
+    
+    public void setSystemRole(String systemRole) {
+        this.systemRole = systemRole;
     }
 }
