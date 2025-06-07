@@ -20,6 +20,11 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.Map;
 
 /**
  * Service for interacting with OpenAI-compatible LLM APIs, including multimodal content processing.
@@ -85,12 +90,22 @@ public class OpenAIService {
         this.objectMapper = objectMapper;
     }
 
-    public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
-        return getChatCompletionStream(conversationMessages, openAIProperties.getModel());
-    }
-    
-    public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
+    private List<Map<String, Object>> prepareMessagesForLlm(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
         List<Map<String, Object>> messagesForLlm = new ArrayList<>();
+
+        // Prepend the system role message
+        String systemRole = openAIProperties.getSystemRole();
+        if (systemRole != null && !systemRole.isEmpty()) {
+            Map<String, Object> systemMessageMap = new HashMap<>();
+            systemMessageMap.put("role", "system");
+            // Append current time to the system role
+            String timeAppendedSystemRole = systemRole + " Current time: " + java.time.Instant.now().toString() + ".";
+            systemMessageMap.put("content", timeAppendedSystemRole);
+            messagesForLlm.add(systemMessageMap);
+            logger.debug("Prepended system message to LLM request: {}", 
+                timeAppendedSystemRole.substring(0, Math.min(100, timeAppendedSystemRole.length())) + "...");
+        }
+
         if (conversationMessages != null) {
             for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : conversationMessages) {
                 Map<String, Object> llmMessage = new HashMap<>();
@@ -103,10 +118,19 @@ public class OpenAIService {
                 messagesForLlm.add(llmMessage);
             }
         }
+        return messagesForLlm;
+    }
 
-        if (messagesForLlm.isEmpty()) {
-            logger.warn("Conversation messages list is empty. Cannot make request to LLM.");
-            return Flux.error(new IllegalArgumentException("Cannot send an empty message list to LLM."));
+    public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
+        return getChatCompletionStream(conversationMessages, openAIProperties.getModel());
+    }
+    
+    public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(conversationMessages);
+
+        if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && conversationMessages.isEmpty())) {
+            logger.warn("Conversation messages list is effectively empty (only system message or completely empty). Cannot make request to LLM.");
+            return Flux.error(new IllegalArgumentException("Cannot send an effectively empty message list to LLM."));
         }
 
         Map<String, Object> requestBody = new HashMap<>();
@@ -204,13 +228,17 @@ public class OpenAIService {
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(openAIProperties.getKey());
 
-        Map<String, Object> messageMap = new HashMap<>();
-        messageMap.put("role", "user");
-        messageMap.put("content", userMessage);
+        // Create a dummy ChatMessage list to reuse prepareMessagesForLlm
+        com.steffenhebestreit.ai_research.Model.ChatMessage userChatMessage = new com.steffenhebestreit.ai_research.Model.ChatMessage();
+        userChatMessage.setRole("user");
+        userChatMessage.setContent(userMessage);
+        List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages = Collections.singletonList(userChatMessage);
+        
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(conversationMessages);
 
         Map<String, Object> requestBodyMap = new HashMap<>();
         requestBodyMap.put("model", openAIProperties.getModel());
-        requestBodyMap.put("messages", Collections.singletonList(messageMap));
+        requestBodyMap.put("messages", messagesForLlm); // Use the prepared messages
         requestBodyMap.put("max_tokens", 150);
         
         // Add discovered MCP tools to request
@@ -673,21 +701,11 @@ public class OpenAIService {
         final java.util.concurrent.atomic.AtomicBoolean streamCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
         final java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress = new java.util.concurrent.atomic.AtomicBoolean(false);
         
-        // Build messages for LLM
-        List<Map<String, Object>> messagesForLlm = new ArrayList<>();
-        for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : messages) {
-            Map<String, Object> llmMessage = new HashMap<>();
-            String role = msg.getRole();
-            if ("agent".equalsIgnoreCase(role)) {
-                role = "assistant";
-            }
-            llmMessage.put("role", role);
-            llmMessage.put("content", msg.getContent());
-            messagesForLlm.add(llmMessage);
-        }
+        // Build messages for LLM using the helper method
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messages);
 
-        if (messagesForLlm.isEmpty()) {
-            sink.error(new IllegalArgumentException("Cannot send an empty message list to LLM."));
+        if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && messages.isEmpty())) {
+            sink.error(new IllegalArgumentException("Cannot send an effectively empty message list to LLM."));
             return;
         }
 
@@ -830,12 +848,11 @@ public class OpenAIService {
     
     /**
      * Handles completion of tool calls and continues the conversation.
-     */
-    private void handleToolCallsCompletion(
-            List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
-            String modelId, 
-            reactor.core.publisher.FluxSink<String> sink,
-            java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
+     */    private void handleToolCallsCompletion(
+        List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
+        String modelId, 
+        reactor.core.publisher.FluxSink<String> sink,
+        java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
         
         // Use reactive approach to avoid blocking in reactive context
         getChatCompletionForToolCallsReactive(messages, modelId)
@@ -851,13 +868,68 @@ public class OpenAIService {
                             JsonNode toolCallsNode = messageNode.path("tool_calls");
                             
                             if (toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
-                                // Execute each tool call
-                                for (JsonNode toolCallNode : toolCallsNode) {
-                                    executeToolCallFromNode(toolCallNode, messages, sink);
-                                }
+                                // Track success/failure for logging
+                                int totalTools = toolCallsNode.size();
+                                int successCount = 0;
+                                int failureCount = 0;
                                 
-                                // Continue conversation with tool results
-                                sink.next("\n[Continuing conversation with tool results...]\n");
+                                // Execute each tool call independently
+                                for (JsonNode toolCallNode : toolCallsNode) {
+                                    try {
+                                        boolean success = executeToolCallFromNode(toolCallNode, messages, sink);
+                                        if (success) {
+                                            successCount++;
+                                        } else {
+                                            failureCount++;
+                                            logger.warn("Tool execution failed but continuing with other tools");
+                                        }
+                                    } catch (Exception e) {
+                                        failureCount++;
+                                        logger.error("Exception during tool execution but continuing with other tools", e);
+                                        
+                                        // Add error message to conversation for this specific tool
+                                        try {
+                                            String toolName = toolCallNode.path("function").path("name").asText("unknown-tool");
+                                            String toolId = toolCallNode.path("id").asText("unknown-id");
+                                              sink.next("\n[Tool '" + toolName + "' execution error: " + e.getMessage() + "]\n");
+                                            
+                                            // Add a tool message with the error for the LLM to understand what happened
+                                            com.steffenhebestreit.ai_research.Model.ChatMessage errorMessage = 
+                                                new com.steffenhebestreit.ai_research.Model.ChatMessage();
+                                            errorMessage.setRole("tool");
+                                            errorMessage.setToolCallId(toolId);
+                                            
+                                            // Create a more detailed error message with guidance
+                                            StringBuilder errorContent = new StringBuilder();
+                                            errorContent.append("Error executing tool '").append(toolName).append("' (ID: ").append(toolId).append("): ")
+                                                      .append(e.getMessage());
+                                            
+                                            // Add helpful instructions for the LLM
+                                            errorContent.append("\n\nPlease check your parameters and try again with a corrected tool call. ")
+                                                      .append("Make sure all required parameters are provided and all parameter types match the expected format.");
+                                            
+                                            errorMessage.setContent(errorContent.toString());
+                                            messages.add(errorMessage);
+                                        } catch (Exception ex) {
+                                            logger.error("Error creating tool error message", ex);
+                                        }
+                                    }
+                                }
+                                  // Log the summary of tool executions
+                                logger.info("Tool execution summary: {} total, {} succeeded, {} failed", 
+                                           totalTools, successCount, failureCount);
+                                
+                                // Continue conversation with tool results (whether successful or failed)
+                                String continuationMessage = "\n[Continuing conversation with " + successCount + " successful and " + 
+                                         failureCount + " failed tool results";
+                                
+                                // Add instructions for the LLM on how to handle failed tools
+                                if (failureCount > 0) {
+                                    continuationMessage += ". Please review the tool error messages and try again with corrected parameters if needed";
+                                }
+                                continuationMessage += "]\n";
+                                
+                                sink.next(continuationMessage);
                                 
                                 // Continue the conversation within the same reactive context
                                 continueConversationAfterTools(messages, modelId, sink, toolExecutionInProgress);
@@ -888,78 +960,242 @@ public class OpenAIService {
                 }
             );
     }
-    
-    /**
+      /**
      * Executes a single tool call and adds the result to the conversation.
-     */
-    private void executeToolCallFromNode(JsonNode toolCallNode, 
+     * @return true if execution was successful, false if it failed
+     */    private boolean executeToolCallFromNode(JsonNode toolCallNode, 
                                 List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages,
-                                reactor.core.publisher.FluxSink<String> sink) {
-        try {
+                                reactor.core.publisher.FluxSink<String> sink) {        try {
             String toolCallId = toolCallNode.path("id").asText();
             JsonNode functionNode = toolCallNode.path("function");
-            String toolName = functionNode.path("name").asText();
+            final String toolName = functionNode.path("name").asText();
             String argumentsJson = functionNode.path("arguments").asText();
             
             sink.next("\n[Executing: " + toolName + "]");
             logger.info("Executing tool call: {} with ID: {}", toolName, toolCallId);
             
             // Parse arguments
-            Map<String, Object> arguments = new HashMap<>();
+            final Map<String, Object> arguments = new HashMap<>();
             if (argumentsJson != null && !argumentsJson.trim().isEmpty()) {
                 try {
-                    arguments = objectMapper.readValue(argumentsJson, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                    arguments.putAll(objectMapper.readValue(argumentsJson, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}));
                 } catch (JsonProcessingException e) {
                     logger.error("Error parsing tool arguments: {}", argumentsJson, e);
+                    sink.next("\n[Error parsing tool arguments: " + e.getMessage() + "]");
                 }
             }
             
-            // Execute the tool via MCP
-            Map<String, Object> toolResult = dynamicIntegrationService.executeToolCall(toolName, arguments);
+            // Send status update for long-running tools
+            sink.next("\n[Tool execution started - this may take some time...]");
+            
+            // Execute the tool via MCP with timeout handling
+            CompletableFuture<Map<String, Object>> toolResultFuture = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return dynamicIntegrationService.executeToolCall(toolName, arguments);
+                } catch (Exception e) {
+                    logger.error("Error executing tool {}: {}", toolName, e.getMessage(), e);
+                    Map<String, Object> errorResult = new HashMap<>();
+                    errorResult.put("error", e.getMessage());
+                    return errorResult;
+                }
+            });
+            
+            // Wait for the tool execution with status updates for long-running operations
+            Map<String, Object> toolResult = null;
+            boolean isTimeout = false;
+            
+            try {
+                // Send status updates every 5 seconds for long-running tools
+                for (int i = 0; i < 60 && !toolResultFuture.isDone(); i++) { // Up to 5 minutes (60 * 5 seconds)
+                    try {
+                        toolResult = toolResultFuture.get(5, TimeUnit.SECONDS);
+                        break; // If we get here, the future completed successfully
+                    } catch (TimeoutException e) {
+                        // Send updates every 5 seconds
+                        if (i > 0 && i % 2 == 0) { // Every 10 seconds
+                            sink.next("\n[Tool execution still in progress - please wait...]");
+                            logger.info("Tool {} still executing after {} seconds", toolName, i * 5);
+                        }
+                    }
+                }
+                  // If still not done after loop, try one more time with a longer timeout
+                if (toolResult == null) {
+                    try {
+                        toolResult = toolResultFuture.get(10, TimeUnit.SECONDS);
+                    } catch (TimeoutException e) {
+                        // Final timeout - but don't consider this a failure
+                        isTimeout = true;
+                        logger.warn("Tool execution for {} timed out after 5 minutes, but continues in the background", toolName);
+                        
+                        // Don't cancel the future - let it continue running in the background
+                        // toolResultFuture.cancel(true);
+                        
+                        Map<String, Object> timeoutResult = new HashMap<>();
+                        timeoutResult.put("status", "running");
+                        timeoutResult.put("message", "Tool execution is taking longer than the maximum wait time of 5 minutes. The operation continues to run in the background and may complete successfully.");
+                        toolResult = timeoutResult;
+                        
+                        sink.next("\n[Tool execution continues in background beyond maximum wait time]");
+                    }
+                }
+            } catch (InterruptedException | ExecutionException e) {
+                logger.error("Error while waiting for tool execution: {}", e.getMessage(), e);
+                Map<String, Object> errorResult = new HashMap<>();
+                errorResult.put("error", "Error waiting for tool execution: " + e.getMessage());
+                toolResult = errorResult;
+            }                if (toolResult == null) {
+                toolResult = new HashMap<>();
+                if (isTimeout) {
+                    // Provide a more informative message for timeout case
+                    toolResult.put("status", "running");
+                    toolResult.put("message", "The tool execution is taking longer than the maximum wait time of 5 minutes. It continues to run in the background on the server and may complete successfully.");
+                } else {
+                    toolResult.put("error", "Unknown error executing tool - null result");
+                }
+            }
             
             // Add assistant message with tool call to conversation
             com.steffenhebestreit.ai_research.Model.ChatMessage assistantMessage = 
                 new com.steffenhebestreit.ai_research.Model.ChatMessage();
             assistantMessage.setRole("assistant");
             assistantMessage.setContent(null); // No text content for tool call message
-            // Note: In a complete implementation, we'd store tool call data as JSON
-            // For now, we'll represent it as a message without content
+            // We add tool call data via tool_calls field in a real implementation
             messages.add(assistantMessage);
             
             // Add tool result as a tool message
             com.steffenhebestreit.ai_research.Model.ChatMessage toolMessage = 
                 new com.steffenhebestreit.ai_research.Model.ChatMessage();
             toolMessage.setRole("tool");
-            
-            String resultContent;
+            toolMessage.setToolCallId(toolCallId); // Link this result to the specific tool call
+              String resultContent;
+            boolean toolSuccess = false;            
             if (toolResult != null) {
                 if (toolResult.containsKey("error")) {
-                    resultContent = "Error: " + toolResult.get("error").toString();
-                    sink.next("\n[Tool error: " + toolResult.get("error") + "]");
-                    logger.error("Tool execution error: {}", toolResult.get("error"));
+                    // Extract error details for better LLM feedback
+                    String errorMsg = toolResult.get("error").toString();
+                    sink.next("\n[Tool error: " + errorMsg + "]");
+                    logger.error("Tool execution error: {}", errorMsg);
+                    
+                    // Structure the error message to help LLM learn from it
+                    StringBuilder formattedError = new StringBuilder();
+                    formattedError.append("Error executing tool '").append(toolName).append("': ").append(errorMsg);
+                    
+                    // Parse error for parameter validation issues to provide more helpful feedback
+                    if (errorMsg.contains("Invalid parameters") || errorMsg.contains("is not allowed")) {
+                        formattedError.append("\n\nThis appears to be a parameter validation error. ");
+                        
+                        // Add the arguments that were sent for context
+                        formattedError.append("The arguments provided were: ");
+                        try {
+                            formattedError.append(objectMapper.writeValueAsString(arguments));
+                        } catch (Exception e) {
+                            formattedError.append(arguments.toString());
+                        }
+                        
+                        // Try to extract parameter details from error message
+                        if (toolResult.get("error") instanceof Map) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> errorDetails = (Map<String, Object>) toolResult.get("error");
+                            if (errorDetails.containsKey("data")) {
+                                formattedError.append("\n\nDetails: ").append(errorDetails.get("data"));
+                            }
+                        }
+                        
+                        // Get parameter schema for the tool if possible
+                        formattedError.append("\n\nPlease try again with valid parameters for this tool.");
+                        
+                        // Suggest corrective action based on error message
+                        if (errorMsg.contains("is not allowed")) {
+                            String param = extractParameterNameFromError(errorMsg);
+                            if (param != null) {
+                                formattedError.append("\n\nThe parameter '").append(param)
+                                    .append("' is not valid for this tool. Please remove it and try again.");
+                            }
+                        }
+                    }
+                    
+                    resultContent = formattedError.toString();
+                    
+                    // Consider partial results as partial success
+                    toolSuccess = toolResult.containsKey("result");
+                    
+                    // Add more context to the error message if we have partial results
+                    if (toolSuccess && toolResult.containsKey("result")) {
+                        resultContent += "\n\nPartial results were obtained and may be useful: " + 
+                                         objectMapper.writeValueAsString(toolResult.get("result"));
+                    }
+                } else if (toolResult.containsKey("status") && "running".equals(toolResult.get("status"))) {
+                    // Handle the case of long-running tools
+                    resultContent = toolResult.get("message").toString();
+                    sink.next("\n[Tool execution continues in background]");
+                    logger.info("Tool '{}' execution continues in background beyond the maximum wait time", toolName);
+                    toolSuccess = true; // Consider this a success since the tool is running as expected
                 } else if (toolResult.containsKey("result")) {
                     resultContent = objectMapper.writeValueAsString(toolResult.get("result"));
                     sink.next("\n[Tool completed successfully]");
                     logger.info("Tool executed successfully, result size: {} chars", resultContent.length());
+                    toolSuccess = true;
                 } else {
                     resultContent = objectMapper.writeValueAsString(toolResult);
                     sink.next("\n[Tool completed]");
                     logger.info("Tool completed, result size: {} chars", resultContent.length());
+                    toolSuccess = true;
                 }
             } else {
-                resultContent = "Tool execution failed";
-                sink.next("\n[Tool execution failed]");
-                logger.error("Tool execution returned null result");
+                resultContent = "Tool execution encountered an issue. The server returned no result. This might indicate a server-side error.";
+                sink.next("\n[Tool execution issue: no result returned]");
+                logger.error("Tool execution returned null result for tool: {}", toolName);
+                toolSuccess = false;
             }
             
             toolMessage.setContent(resultContent);
             messages.add(toolMessage);
             
-            logger.info("Added tool result to conversation. Message count now: {}", messages.size());
-            
-        } catch (Exception e) {
+            logger.info("Added tool result to conversation for tool '{}'. Message count now: {}", toolName, messages.size());
+            return toolSuccess;
+              } catch (Exception e) {
             logger.error("Error executing tool call", e);
-            sink.next("\n[Tool execution error: " + e.getMessage() + "]");
+            sink.next("\n[Tool execution error: " + e.getMessage() + "]\n");
+            
+            // Extract tool information from node if possible for better error reporting
+            String toolName = "unknown-tool";
+            String toolId = "unknown-id";
+            try {
+                toolName = toolCallNode.path("function").path("name").asText("unknown-tool");
+                toolId = toolCallNode.path("id").asText("unknown-id");
+            } catch (Exception ex) {
+                logger.error("Error extracting tool info for error message", ex);
+            }
+            
+            // Add a tool message with the error for the LLM to understand what happened
+            com.steffenhebestreit.ai_research.Model.ChatMessage errorMessage = 
+                new com.steffenhebestreit.ai_research.Model.ChatMessage();
+            errorMessage.setRole("tool");
+            errorMessage.setToolCallId(toolId); // Link the error to the specific tool call ID
+            
+            // Create a more informative error message
+            String errorContent = "Error executing tool '" + toolName + "' (ID: " + toolId + "): " + e.getMessage();
+            
+            // Add root cause if available
+            if (e.getCause() != null) {
+                errorContent += "\nRoot cause: " + e.getCause().getMessage();
+            }
+              // Add a user-friendly message to help understand the impact
+            errorContent += "\n\nThe system encountered an error while executing this tool. " +
+                           "Other tools may still have succeeded. Please consider the partial " +
+                           "information available and adjust your approach accordingly.";
+            
+            // Add guidance for retrying with corrected parameters
+            errorContent += "\n\nPlease try again with corrected parameters. Make sure that:\n" +
+                           "1. You're only using parameters defined in the tool's schema\n" +
+                           "2. Parameter types match what the tool expects\n" +
+                           "3. Required parameters are provided\n" +
+                           "4. Parameter values are within expected ranges or formats";
+            
+            errorMessage.setContent(errorContent);
+            messages.add(errorMessage);
+            
+            return false;
         }
     }
     
@@ -1005,12 +1241,11 @@ public class OpenAIService {
     
     /**
      * Continues the conversation after tool execution within the same reactive context.
-     */
-    private void continueConversationAfterTools(
-            List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
-            String modelId, 
-            reactor.core.publisher.FluxSink<String> sink,
-            java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
+     */    private void continueConversationAfterTools(
+        List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
+        String modelId, 
+        reactor.core.publisher.FluxSink<String> sink,
+        java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
         
         // Build messages for LLM including the tool results
         List<Map<String, Object>> messagesForLlm = new ArrayList<>();
@@ -1036,12 +1271,19 @@ public class OpenAIService {
             }
             
             // Limit content size for tool messages to prevent overwhelming the LLM
-            if ("tool".equals(role) && content.length() > 3000) {
-                content = content.substring(0, 3000) + "... [content truncated]";
-                logger.debug("Truncated tool result content from {} to 3000 chars", content.length());
+            if ("tool".equals(role) && content.length() > 5000) {
+                content = content.substring(0, 5000) + "... [content truncated for length]";
+                logger.debug("Truncated tool result content from {} to 5000 chars", content.length());
             }
             
             llmMessage.put("content", content);
+            
+            // Add tool_call_id for tool messages if available
+            if ("tool".equals(role) && msg.getToolCallId() != null) {
+                llmMessage.put("tool_call_id", msg.getToolCallId());
+                logger.debug("Added tool_call_id to message: {}", msg.getToolCallId());
+            }
+            
             messagesForLlm.add(llmMessage);
         }
         
@@ -1053,8 +1295,8 @@ public class OpenAIService {
                 Map<String, Object> msg = messagesForLlm.get(i);
                 String content = (String) msg.get("content");
                 int contentLength = content != null ? content.length() : 0;
-                logger.debug("Continuation message {}: role={}, content_length={}", 
-                    i, msg.get("role"), contentLength);
+                logger.debug("Continuation message {}: role={}, content_length={}, tool_call_id={}", 
+                    i, msg.get("role"), contentLength, msg.get("tool_call_id"));
             }
         }
         
@@ -1064,20 +1306,14 @@ public class OpenAIService {
             sink.next("\n[Tool execution completed successfully]");
             sink.complete();
             return;
-        }
-
-        Map<String, Object> requestBody = new HashMap<>();
+        }        Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", modelId);
         requestBody.put("messages", messagesForLlm);
         requestBody.put("stream", true);
         
-        // Add MCP tools for potential future tool calls
-        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
-        if (mcpTools != null && !mcpTools.isEmpty()) {
-            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
-            logger.info("Adding {} MCP tools to continuation request", formattedTools.size());
-            requestBody.put("tools", formattedTools);
-        }
+        // DO NOT add tools to continuation requests to prevent recursive tool calls
+        // Tools should only be available in the initial request, not in continuations
+        logger.info("Continuation request without tools to prevent recursive tool execution");
 
         String path = "/chat/completions";
 
@@ -1104,12 +1340,12 @@ public class OpenAIService {
                 // Add delay before completion to ensure content is fully transmitted
                 .doOnComplete(() -> {
                     logger.info("CONTINUATION: Raw stream completed, scheduling sink completion after delay");
-                    // Reset tool execution flag since we're completing
-                    toolExecutionInProgress.set(false);
                     // Use a scheduler to add a small delay before completing
                     reactor.core.scheduler.Schedulers.single().schedule(() -> {
                         if (streamCompleted.compareAndSet(false, true)) {
                             logger.info("CONTINUATION: Completing sink after stream completion delay");
+                            // Reset tool execution flag only when actually completing the sink
+                            toolExecutionInProgress.set(false);
                             sink.complete();
                         }
                     }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -1158,13 +1394,30 @@ public class OpenAIService {
                                 if (finishReasonNode.isTextual()) {
                                     String finishReason = finishReasonNode.asText();
                                     logger.info("CONTINUATION: Stream finished with reason: '{}'", finishReason);
-                                    
-                                    if ("tool_calls".equals(finishReason)) {
-                                        // Handle nested tool calls
-                                        logger.info("CONTINUATION: Handling nested tool calls");
+                                      if ("tool_calls".equals(finishReason)) {
+                                        // Handle tool calls - but only if no tool execution is currently in progress
+                                        logger.info("CONTINUATION: Tool calls detected in continuation stream");
                                         
-                                        // Prevent concurrent tool execution
+                                        // Count existing tool calls to prevent infinite loops
+                                        long toolCallCount = messages.stream()
+                                            .filter(msg -> "tool".equals(msg.getRole()))
+                                            .count();
+                                              if (toolCallCount >= 5) {
+                                            logger.warn("CONTINUATION: Maximum tool call limit reached ({}), preventing potential infinite loop", toolCallCount);
+                                            if (streamCompleted.compareAndSet(false, true)) {
+                                                reactor.core.Disposable currentSub = subscriptionRef.get();
+                                                if (currentSub != null && !currentSub.isDisposed()) {
+                                                    currentSub.dispose();
+                                                }
+                                                sink.next("\n[Maximum tool call limit reached. Completing conversation.]\n");
+                                                sink.complete();
+                                            }
+                                            return;
+                                        }
+                                        
+                                        // Only allow tool execution if none is currently in progress
                                         if (toolExecutionInProgress.compareAndSet(false, true)) {
+                                            logger.info("CONTINUATION: Starting tool execution ({}/5 tool calls used)", toolCallCount + 1);
                                             if (streamCompleted.compareAndSet(false, true)) {
                                                 // Cancel the current subscription to prevent completion handlers from running
                                                 reactor.core.Disposable currentSub = subscriptionRef.get();
@@ -1174,14 +1427,8 @@ public class OpenAIService {
                                                 handleToolCallsCompletion(messages, modelId, sink, toolExecutionInProgress);
                                             }
                                         } else {
-                                            logger.warn("CONTINUATION: Tool execution already in progress, ignoring nested tool calls and canceling stream");
-                                            // Cancel the subscription since we're ignoring nested tool calls
-                                            if (streamCompleted.compareAndSet(false, true)) {
-                                                reactor.core.Disposable currentSub = subscriptionRef.get();
-                                                if (currentSub != null && !currentSub.isDisposed()) {
-                                                    currentSub.dispose();
-                                                }
-                                            }
+                                            // Tool execution already in progress - ignore this tool call request
+                                            logger.warn("CONTINUATION: Tool execution already in progress, ignoring duplicate tool call request");
                                             return;
                                         }
                                         return;
@@ -1197,8 +1444,7 @@ public class OpenAIService {
                                 sink.error(e);
                             }
                         } catch (Exception e) {
-                            logger.error("Unexpected error processing continuation chunk: '{}'", jsonChunk, e);
-                            if (streamCompleted.compareAndSet(false, true)) {
+                            logger.error("Unexpected error processing continuation chunk: '{}'", jsonChunk, e);                            if (streamCompleted.compareAndSet(false, true)) {
                                 sink.error(e);
                             }
                         }
@@ -1206,10 +1452,10 @@ public class OpenAIService {
                     error -> {
                         logger.error("Error in continuation streaming response after retries", error);
                         
-                        // Reset tool execution flag since we're completing with error
-                        toolExecutionInProgress.set(false);
-                        
                         if (streamCompleted.compareAndSet(false, true)) {
+                            // Reset tool execution flag since we're completing with error
+                            toolExecutionInProgress.set(false);
+                            
                             // Provide a fallback response instead of failing completely
                             sink.next("\n\n[Tool execution completed successfully, but continuation response failed. ");
                             sink.next("Tool results were processed. ");
@@ -1221,6 +1467,72 @@ public class OpenAIService {
         
         // Store the subscription reference so we can cancel it if needed
         subscriptionRef.set(subscription);
+    }
+    
+    /**
+     * Extracts parameter name from error messages related to invalid parameters.
+     * 
+     * @param errorMessage The error message to parse
+     * @return The parameter name if it can be extracted, null otherwise
+     */
+    private String extractParameterNameFromError(String errorMessage) {
+        if (errorMessage == null || errorMessage.isEmpty()) {
+            return null;
+        }
+        
+        // Try to extract parameter name from common error patterns
+        try {
+            // Pattern: "X is not allowed" - commonly used by JSON Schema validation errors
+            if (errorMessage.contains("is not allowed")) {
+                int start = errorMessage.indexOf("\"");
+                int end = errorMessage.lastIndexOf("\"");
+                if (start >= 0 && end > start) {
+                    return errorMessage.substring(start + 1, end);
+                }
+                
+                // Try without quotes
+                start = errorMessage.indexOf("[");
+                end = errorMessage.indexOf("]");
+                if (start >= 0 && end > start) {
+                    return errorMessage.substring(start + 1, end);
+                }
+            }
+            
+            // Pattern: "Missing required parameter: X"
+            if (errorMessage.contains("Missing required parameter")) {
+                int colonIndex = errorMessage.indexOf(":");
+                if (colonIndex >= 0 && colonIndex < errorMessage.length() - 1) {
+                    return errorMessage.substring(colonIndex + 1).trim();
+                }
+            }
+            
+            // Pattern from JSON-RPC errors: "Invalid parameters for tool X, data={details=[...]}""
+            if (errorMessage.contains("Invalid parameters for tool") && errorMessage.contains("details=")) {
+                int detailsStart = errorMessage.indexOf("details=");
+                if (detailsStart >= 0) {
+                    String details = errorMessage.substring(detailsStart + 8); // "details=".length()
+                    
+                    // Extract parameter name from JSON-like structure [{"param":"X"}] or ["X is not allowed"]
+                    int quotedParamStart = details.indexOf("\"");
+                    if (quotedParamStart >= 0) {
+                        int quotedParamEnd = details.indexOf("\"", quotedParamStart + 1);
+                        if (quotedParamEnd > quotedParamStart) {
+                            String potentialParam = details.substring(quotedParamStart + 1, quotedParamEnd);
+                            // Check if this is a parameter name or a full message
+                            if (!potentialParam.contains(" ")) { // Simple parameter name shouldn't contain spaces
+                                return potentialParam;
+                            } else if (potentialParam.contains("\" is not allowed")) {
+                                return potentialParam.substring(0, potentialParam.indexOf("\" is not allowed"));
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error extracting parameter name from error message: {}", e.getMessage());
+        }
+        
+        return null;
     }
 
     // ...existing code...

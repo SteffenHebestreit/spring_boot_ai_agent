@@ -182,6 +182,33 @@ public void testToolExecutionWorkflow() {
 3. **Progress Indicators**: Use tool execution messages for UX
 4. **Fallback Handling**: Graceful degradation when tools fail
 
+## HTTP Status Code Handling
+
+### HTTP 304 "Not Modified" Support
+
+The system now properly handles HTTP 304 "Not Modified" responses from MCP servers:
+
+- **Behavior**: HTTP 304 is treated as a successful tool execution
+- **Response Handling**: Attempts to parse response body if available
+- **Fallback**: Creates success response indicating cached result
+- **Logging**: Clear distinction between actual errors and cache hits
+
+```java
+// Example HTTP 304 handling in DynamicIntegrationService
+if (httpException.getStatusCode() == HttpStatus.NOT_MODIFIED) {
+    logger.info("Tool '{}' on server {} returned HTTP 304 (Not Modified) - treating as successful", 
+               toolName, serverConfig.getName());
+    // Parse response body or create cache success response
+}
+```
+
+### Status Code Categories
+
+- **2xx Success**: Standard successful tool execution
+- **304 Not Modified**: Cached content, treated as successful
+- **4xx Client Error**: Authentication or parameter errors
+- **5xx Server Error**: MCP server internal errors
+
 ## Troubleshooting
 
 ### Common Issues
@@ -190,6 +217,7 @@ public void testToolExecutionWorkflow() {
 2. **Session Errors**: Verify MCP server initialization
 3. **Streaming Interruption**: Check WebClient configuration and timeouts
 4. **Tool Execution Timeout**: Review MCP server performance
+5. **HTTP 304 Issues**: Previously caused "Tool execution failed" - now handled correctly
 
 ### Debug Logging
 ```properties
@@ -203,3 +231,78 @@ logging.level.com.steffenhebestreit.ai_research.Service.DynamicIntegrationServic
 - **Tool Result Caching**: Cache frequently used tool results
 - **Custom Tool Timeout**: Configurable timeout per tool type
 - **Tool Usage Analytics**: Track tool usage and performance metrics
+
+## Enhanced Error Handling for Tool-Only Responses
+
+The system now provides better error handling for cases where an AI response consists solely of tool-related content:
+
+### Problem Statement
+
+When an AI response contains only tool calls or tool execution status messages (e.g., `[Calling tool: search]`), and no actual textual content, the client would receive an empty message after filtering. This could lead to confusion, where the client sees tool execution happening but no final response appears.
+
+### Implementation
+
+The ChatController's streaming endpoint now:
+
+1. Collects the full response during streaming
+2. After streaming completes, filters out tool-related content
+3. Checks if the filtered response is empty
+4. If empty (but originally contained content), sends an error message:
+   ```json
+   {"error": "AI response was empty after filtering tool-related content."}
+   ```
+5. The frontend can catch this error and display an appropriate message to the user
+
+### Benefits
+
+This enhancement:
+- Provides explicit feedback to the frontend about empty responses
+- Helps distinguish between actual empty responses and responses that became empty after filtering
+- Allows the frontend to present a clearer message to users about what happened
+- Prevents silent failures where the user is left wondering why no response appeared
+
+### Integration with Tool Execution Workflow
+
+This enhancement fits into the existing tool execution workflow:
+
+```mermaid
+sequenceDiagram
+    participant Frontend as Frontend Client
+    participant Controller as ChatController
+    participant OpenAI as OpenAIService  
+    participant LLM as LLM Server
+    participant DIS as DynamicIntegrationService
+    participant MCP as MCP Server
+
+    Frontend->>Controller: POST /stream-chat
+    Controller->>OpenAI: getChatCompletionStreamWithToolExecution()
+    OpenAI->>LLM: Streaming request with tools
+    
+    loop Streaming Response
+        LLM-->>OpenAI: Tool execution content
+        OpenAI-->>Controller: Stream raw content
+        Controller-->>Frontend: [Tool execution messages]
+    end
+    
+    OpenAI->>DIS: executeToolCall(toolName, params)
+    DIS->>MCP: JSON-RPC tool execution
+    MCP-->>DIS: Tool result
+    DIS-->>OpenAI: Formatted result
+    OpenAI->>LLM: Continue conversation with tool results
+    
+    alt Tool-only response
+        LLM-->>OpenAI: Only tool-related content
+        OpenAI-->>Controller: Raw content
+        Controller->>Controller: Filter tool content
+        Controller->>Controller: Detect empty result
+        Controller-->>Frontend: {"error": "AI response was empty after filtering tool-related content."}
+    else Response with actual content
+        LLM-->>OpenAI: Response with actual content
+        OpenAI-->>Controller: Raw content
+        Controller->>Controller: Filter tool content
+        Controller->>Controller: Save filtered response
+        Controller-->>Frontend: Final filtered response
+    end
+```
+
+This improvement completes the tool execution cycle with proper error handling, ensuring users always receive appropriate feedback.

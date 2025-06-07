@@ -5,6 +5,7 @@ import com.steffenhebestreit.ai_research.Model.Message;
 import com.steffenhebestreit.ai_research.Service.ChatService;
 import com.steffenhebestreit.ai_research.Service.MultimodalContentService;
 import com.steffenhebestreit.ai_research.Service.OpenAIService;
+import com.steffenhebestreit.ai_research.Util.ContentFilterUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -228,8 +229,7 @@ public class MultimodalController {
             
             // StringBuilder to accumulate the response
             StringBuilder responseAggregator = new StringBuilder();
-            
-            // Get and return the streaming response - this would need to be implemented in OpenAIService
+              // Get and return the streaming response - this would need to be implemented in OpenAIService
             return openAIService.getMultimodalCompletionStream(multimodalContent, modelId)
                     .doOnNext(responseAggregator::append) // Append each chunk to the aggregator
                     .doOnComplete(() -> {
@@ -237,7 +237,9 @@ public class MultimodalController {
                         try {
                             String fullResponse = responseAggregator.toString();
                             if (chat != null && !fullResponse.isEmpty()) {
-                                Message agentMsg = new Message("agent", "text/plain", fullResponse);
+                                // Filter out <think> tags and ensure content fits within database constraints
+                                String filteredResponse = ContentFilterUtil.filterForDatabase(fullResponse);
+                                Message agentMsg = new Message("agent", "text/plain", filteredResponse);
                                 chatService.addMessageToChat(chat.getId(), agentMsg);
                             }
                         } catch (Exception e) {

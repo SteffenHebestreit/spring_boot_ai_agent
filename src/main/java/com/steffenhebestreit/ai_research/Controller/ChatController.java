@@ -6,6 +6,8 @@ import com.steffenhebestreit.ai_research.Model.ChatMessage;
 import com.steffenhebestreit.ai_research.Model.Message;
 import com.steffenhebestreit.ai_research.Service.ChatService;
 import com.steffenhebestreit.ai_research.Service.OpenAIService;
+import com.steffenhebestreit.ai_research.Util.ContentFilterUtil;
+import com.steffenhebestreit.ai_research.Util.ContentFilterUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -15,6 +17,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -156,10 +159,17 @@ public class ChatController {    private static final Logger logger = LoggerFact
      * @param initialMessage The initial message to start the chat with
      * @return ResponseEntity with JSON-RPC response containing the created chat (HTTP 201)
      * @throws IllegalArgumentException if initialMessage is invalid
-     */
-    @PostMapping("/create")
-    public ResponseEntity<Map<String, Object>> createChat(@RequestBody Message initialMessage) {
-        try {
+     */    @PostMapping("/create")
+    public ResponseEntity<Map<String, Object>> createChat(@RequestBody Message initialMessage) {        try {
+            // Filter the initial message content to remove thinking tags and ensure it fits database constraints
+            if (initialMessage.getContent() != null && initialMessage.getContent() instanceof String) {
+                String originalContent = (String) initialMessage.getContent();
+                String filteredContent = ContentFilterUtil.filterForDatabase(originalContent);
+                initialMessage.setContent(filteredContent);
+                logger.debug("Filtered initial message content, original length: {}, filtered length: {}", 
+                    originalContent.length(), filteredContent.length());
+            }
+            
             Chat chat = chatService.createChat(initialMessage); // This saves the initial user message
             
             Map<String, Object> response = new HashMap<>();
@@ -199,10 +209,19 @@ public class ChatController {    private static final Logger logger = LoggerFact
      * @return ResponseEntity with JSON-RPC response containing updated chat
      * @throws RuntimeException if chat is not found
      * @throws IllegalArgumentException if message format is invalid
-     */
-    @PostMapping("/{chatId}/messages")
-    public ResponseEntity<Map<String, Object>> addMessageToChat(@PathVariable String chatId, @RequestBody Message message) {
-        try {
+     */    @PostMapping("/{chatId}/messages")
+    public ResponseEntity<Map<String, Object>> addMessageToChat(@PathVariable String chatId, @RequestBody Message message) {        try {
+            // Filter the message content to remove thinking tags and ensure it fits database constraints
+            if (message.getContent() != null && message.getContent() instanceof String) {
+                String originalContent = (String) message.getContent();
+                String filteredContent = ContentFilterUtil.filterForDatabase(originalContent);
+                message.setContent(filteredContent);
+                logger.debug("Filtered message content for chat {}, original length: {}, filtered length: {}", 
+                    chatId, 
+                    originalContent.length(), 
+                    filteredContent.length());
+            }
+            
             Chat chat = chatService.addMessageToChat(chatId, message);
             Map<String, Object> response = new HashMap<>();
             response.put("result", chat);
@@ -216,7 +235,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(createErrorResponse(-32000, "Unexpected error adding message: " + e.getMessage()));
         }
-    }    /**
+    }/**
      * Streams AI responses for a message in an existing chat session.
      * 
      * <p>Provides real-time streaming AI responses within the context of an existing chat.
@@ -252,9 +271,10 @@ public class ChatController {    private static final Logger logger = LoggerFact
      * <p><strong>Note:</strong> This endpoint expects the user message to already be saved
      * to the chat history by the frontend before calling. If history is empty, it creates
      * a temporary message for AI processing.</p>
-     * 
-     * @param chatId The unique identifier of the chat session
+     *     * @param chatId The unique identifier of the chat session
      * @param userMessageContent The user's message content as plain text
+     * @param llmId Optional ID of the language model to use
+     * @param autoSaveResponse Whether to automatically save the AI response after streaming completes (default: true)
      * @return Flux&lt;String&gt; streaming AI response chunks in NDJSON format
      * @throws IllegalArgumentException if userMessageContent is null or empty
      * @see #addMessageToChat(String, Message) for saving messages to chat
@@ -263,62 +283,132 @@ public class ChatController {    private static final Logger logger = LoggerFact
     public Flux<String> streamMessage(
             @PathVariable String chatId, 
             @RequestBody String userMessageContent,
-            @RequestParam(value = "llmId", required = false) String llmId) {
+            @RequestParam(value = "llmId", required = false) String llmId,
+            @RequestParam(value = "autoSaveResponse", defaultValue = "true") boolean autoSaveResponse) {
         
         if (userMessageContent == null || userMessageContent.trim().isEmpty()) {
+            // Return a Flux error that will be caught by onErrorResume
             return Flux.error(new IllegalArgumentException("User message cannot be empty"));
         }
 
         try {
-            // Use the specified llmId or fall back to the default model
             String modelToUse = (llmId != null && !llmId.isEmpty()) ? 
                 llmId : openAIProperties.getModel();
             
             logger.info("Using LLM model: {} for chat: {}", modelToUse, chatId);
             
-            // Fetch the existing conversation history
             List<ChatMessage> conversationHistory = chatService.getChatMessages(chatId);
             
-            // The user's new message is already saved by the frontend before this call.
-            // So, the conversationHistory should ideally contain it if fetched after save.
-            // If not, we might need to adjust the frontend to ensure the message is saved first,
-            // or add the current userMessageContent to the history list before sending to OpenAI.
-            // For now, let's assume conversationHistory is up-to-date.
-            // If the AI is not seeing the latest user message, this is the area to investigate.
-
-            logger.info("Streaming message for chat ID: {}. History size: {}", chatId, conversationHistory.size());            if (!conversationHistory.isEmpty()) {
-                // Safely extract content as a string for logging
-                String contentPreview = "";
-                Object lastContent = conversationHistory.get(conversationHistory.size()-1).getContent();
-                if (lastContent instanceof String) {
-                    contentPreview = ((String) lastContent).substring(0, Math.min(100, ((String) lastContent).length()));
-                } else if (lastContent != null) {
-                    contentPreview = "Non-text content: " + lastContent.getClass().getSimpleName();
+            boolean foundCurrentUserMessage = false;
+            if (!conversationHistory.isEmpty()) {
+                ChatMessage lastMessage = conversationHistory.get(conversationHistory.size() - 1);
+                if ("user".equals(lastMessage.getRole()) && 
+                    lastMessage.getContent() != null && 
+                    lastMessage.getContent().equals(userMessageContent)) {
+                    foundCurrentUserMessage = true;
                 }
-                
-                logger.debug("Last message in history for chat {}: Role: {}, Content: {}", 
-                    chatId, 
-                    conversationHistory.get(conversationHistory.size()-1).getRole(), 
-                    contentPreview);
-            } else {
-                // This case should ideally not happen if a chat is created with an initial message.
-                // If it does, it means we are streaming for a chat that has no messages in DB yet.
-                // We might need to construct a minimal history with the current userMessageContent.
-                logger.warn("Conversation history for chat {} is empty. This might lead to unexpected AI behavior.", chatId);
-                // Fallback: create a temporary history with just the current user message
-                // This is a quick fix; ideally, the chat creation and message addition flow ensures history is present.
-                ChatMessage currentMsg = new ChatMessage();
-                currentMsg.setRole("user");
-                currentMsg.setContent(userMessageContent);
-                // currentMsg.setTimestamp(java.time.LocalDateTime.now()); // Timestamp not strictly needed for LLM call
-                // currentMsg.setChat(chatService.getChatById(chatId).orElse(null)); // Chat association not strictly needed for LLM call
-                conversationHistory = List.of(currentMsg);
-            }            return openAIService.getChatCompletionStreamWithToolExecution(conversationHistory, modelToUse)
-                    .doOnError(e -> logger.error("Error during AI stream for chat {}: {}", chatId, e.getMessage(), e))
-                    .onErrorResume(e -> Flux.just("{\"error\": \"Error processing your request: " + e.getMessage().replace("\"", "\\\"") + "\"}")); // Send error as JSON
+            }
+            if (!foundCurrentUserMessage) {
+                logger.warn("Current user message not found in conversation history. Saving it to database and adding to LLM context for chat {}.", chatId);
+                try {
+                    Message userMessage = new Message("user", "text/plain", userMessageContent);
+                    chatService.addMessageToChat(chatId, userMessage);
+                    logger.info("Saved missing user message to chat {} database", chatId);
+                    
+                    ChatMessage tempUserMessage = new ChatMessage();
+                    tempUserMessage.setRole("user");
+                    tempUserMessage.setContentType("text/plain");
+                    tempUserMessage.setContent(userMessageContent);
+                    tempUserMessage.setTimestamp(Instant.now());
+                    conversationHistory.add(tempUserMessage);
+                } catch (Exception e) {
+                    logger.error("Failed to save user message to database for chat {}: {}", chatId, e.getMessage(), e);
+                    ChatMessage tempUserMessage = new ChatMessage();
+                    tempUserMessage.setRole("user");
+                    tempUserMessage.setContentType("text/plain");
+                    tempUserMessage.setContent(userMessageContent);
+                    tempUserMessage.setTimestamp(Instant.now());
+                    conversationHistory.add(tempUserMessage); // Add to history for LLM even if DB save fails
+                }
+            }
+            
+            logger.info("Streaming message for chat ID: {}. History size: {}", chatId, conversationHistory.size());
+            if (logger.isDebugEnabled()) {
+                for (int i = 0; i < conversationHistory.size(); i++) {
+                    ChatMessage msg = conversationHistory.get(i);
+                    Object content = msg.getContent();
+                    String contentPreview = "null";
+                    if (content instanceof String) {
+                        contentPreview = ((String)content).substring(0, Math.min(50, ((String)content).length())) + "...";
+                    } else if (content != null) {
+                        contentPreview = "Non-string content: " + content.getClass().getSimpleName();
+                    }
+                    logger.debug("History [{} for chat {}] - Role: {}, Content: {}", i, chatId, msg.getRole(), contentPreview);
+                }
+            }
+
+            if (conversationHistory.isEmpty()) {
+                logger.error("Conversation history for chat {} is empty after attempting to prepare it. This should not happen.", chatId);
+                return Flux.just("{\"error\": \"No conversation history found or could be prepared. Please ensure the user message is saved before streaming.\"}");
+            }
+
+            StringBuilder responseAggregator = new StringBuilder();
+            
+            Flux<String> openAiFlux = openAIService.getChatCompletionStreamWithToolExecution(conversationHistory, modelToUse)
+                    .doOnNext(responseAggregator::append)
+                    .doOnError(e -> logger.error("Error during AI stream for chat {}: {}", chatId, e.getMessage(), e)); // Log OpenAI specific errors
+
+            return Flux.concat(openAiFlux, Flux.defer(() -> {
+                String fullResponse = responseAggregator.toString();
+                String filteredResponse = ContentFilterUtil.filterForDatabase(fullResponse); // Changed to filterForDatabase
+                boolean effectivelyEmpty = filteredResponse.isEmpty();
+                boolean wasOriginallyContent = !fullResponse.isEmpty(); // Check if there was any content before filtering
+
+                if (autoSaveResponse) {
+                    if (effectivelyEmpty && wasOriginallyContent) { // Only error if there was content and it all got filtered out
+                        logger.info("AI response for chat {} was empty after filtering tool-related content. Not saving. Signaling error to frontend.", chatId);
+                        return Flux.error(new RuntimeException("AI response was empty after filtering tool-related content."));
+                    } else if (!effectivelyEmpty) { // Save only if there's something to save
+                        try {
+                            Message agentMessage = new Message("agent", "text/plain", filteredResponse);
+                            agentMessage.setLlmId(modelToUse); // Set the LLM ID
+                            chatService.addMessageToChat(chatId, agentMessage);
+                            logger.info("Saved agent response for chat {} with LLM: {}", chatId, modelToUse);
+                        } catch (Exception e) {
+                            logger.error("Error saving streamed response to chat history for chat ID {}: {}", chatId, e.getMessage(), e);
+                            // Optionally, convert this to a stream error if critical
+                            // return Flux.error(new RuntimeException("Failed to save AI response: " + e.getMessage()));
+                        }
+                    } else {
+                        // If effectivelyEmpty is true AND wasOriginallyContent is false, it means the AI produced no output at all.
+                        // This is different from producing only tool calls. We might not want to error here, or handle it differently.
+                        logger.info("AI response for chat {} was completely empty (no tool calls, no text). Not saving.", chatId);
+                    }
+                } else { // autoSaveResponse is false
+                    logger.info("Auto-save disabled for chat {}. Response will not be saved by backend.", chatId);
+                    if (effectivelyEmpty && wasOriginallyContent) {
+                        logger.info("AI response for chat {} (auto-save off) consisted only of tool-related content, which was filtered out. Signaling error.", chatId);
+                        return Flux.error(new RuntimeException("AI response consisted only of tool-related content, which was filtered out."));
+                    }
+                }
+                return Flux.empty(); // Normal completion if no error condition met
+            }))
+            .onErrorResume(e -> {
+                logger.error("Error in stream processing for chat {}: {}", chatId, e.getMessage(), e);
+                String errorMessageValue;
+                if (e.getMessage() != null &&
+                    (e.getMessage().contains("AI response was empty after filtering tool-related content.") ||
+                     e.getMessage().contains("AI response consisted only of tool-related content, which was filtered out."))) {
+                    errorMessageValue = e.getMessage().replace("\"", "\\\"");
+                } else {
+                    errorMessageValue = "Error processing your request: " + (e.getMessage() != null ? e.getMessage().replace("\"", "\\\"") : "Unknown error");
+                }
+                return Flux.just("{\"error\": \"" + errorMessageValue + "\"}");
+            });
+
         } catch (Exception e) {
             logger.error("Error initiating stream for chat {}: {}", chatId, e.getMessage(), e);
-            return Flux.just("{\"error\": \"Error initiating stream: " + e.getMessage().replace("\"", "\\\"") + "\"}"); // Send error as JSON
+            return Flux.just("{\"error\": \"Error initiating stream: " + e.getMessage().replace("\"", "\\\"") + "\"}");
         }
     }    /**
      * Updates the title of an existing chat session.

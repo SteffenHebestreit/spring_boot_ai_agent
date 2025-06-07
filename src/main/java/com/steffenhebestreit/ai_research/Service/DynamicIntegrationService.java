@@ -931,14 +931,12 @@ public class DynamicIntegrationService {
         
         logger.error("All session setup approaches failed for server: {}", mcpConfig.getName());
         return null;
-    }
-
-    public DynamicIntegrationService(IntegrationProperties integrationProperties, RestTemplateBuilder restTemplateBuilder) {
+    }    public DynamicIntegrationService(IntegrationProperties integrationProperties, RestTemplateBuilder restTemplateBuilder) {
         this.integrationProperties = integrationProperties;
 
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(5000); // 5 seconds connection timeout
-        requestFactory.setReadTimeout(10000);   // 10 seconds read timeout
+        requestFactory.setConnectTimeout(30000);  // 30 seconds connection timeout
+        requestFactory.setReadTimeout(360000);    // 6 minutes read timeout (longer than the max tool execution time)
 
         this.restTemplate = restTemplateBuilder
                 .requestFactory(() -> requestFactory) // Use a supplier for the request factory
@@ -1027,8 +1025,46 @@ public class DynamicIntegrationService {
                 logger.error("Invalid response from tool execution for '{}' on server: {}. Response: {}", 
                            toolName, serverConfig.getName(), response);
                 return null;
+            }        } catch (RestClientException e) {
+            // Handle HTTP 304 "Not Modified" as a successful response
+            if (e instanceof org.springframework.web.client.HttpClientErrorException) {
+                org.springframework.web.client.HttpClientErrorException httpException = 
+                    (org.springframework.web.client.HttpClientErrorException) e;
+                
+                if (httpException.getStatusCode() == org.springframework.http.HttpStatus.NOT_MODIFIED) {
+                    logger.info("Tool '{}' on server {} returned HTTP 304 (Not Modified) - treating as successful", 
+                               toolName, serverConfig.getName());
+                    
+                    // Try to extract response body from 304 response
+                    String responseBody = httpException.getResponseBodyAsString();
+                    if (responseBody != null && !responseBody.isEmpty()) {
+                        try {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> parsedResponse = new ObjectMapper().readValue(responseBody, Map.class);
+                            if (parsedResponse.containsKey("result")) {
+                                logger.info("Tool '{}' executed successfully with HTTP 304 on server: {}", 
+                                           toolName, serverConfig.getName());
+                                return parsedResponse;
+                            }
+                        } catch (Exception parseException) {
+                            logger.debug("Could not parse 304 response body as JSON for tool '{}': {}", 
+                                        toolName, parseException.getMessage());
+                        }
+                    }
+                    
+                    // If no valid response body, create a success response indicating cache hit
+                    Map<String, Object> cacheResponse = new HashMap<>();
+                    Map<String, Object> result = new HashMap<>();
+                    result.put("content", Arrays.asList(Map.of(
+                        "type", "text",
+                        "text", "Tool executed successfully (cached result - no changes detected)"
+                    )));
+                    cacheResponse.put("result", result);
+                    cacheResponse.put("jsonrpc", "2.0");
+                    return cacheResponse;
+                }
             }
-        } catch (RestClientException e) {
+            
             logger.error("RestClientException while executing tool '{}' on server {}: {}. URL: {}", 
                         toolName, serverConfig.getName(), e.getMessage(), mcpEndpointUrl, e);
             return null;

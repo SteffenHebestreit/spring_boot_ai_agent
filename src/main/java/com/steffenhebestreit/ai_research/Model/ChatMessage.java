@@ -69,11 +69,10 @@ public class ChatMessage {
     private Chat chat;
     
     private String role;
-    
-    @Column(name = "content_type")
+      @Column(name = "content_type")
     private String contentType;
     
-    @Column(length = 10000) // Increase column size for larger messages
+    @Column(length = 30000) // Increased column size to handle larger LLM messages (up to 30K characters)
     private String content;
 
     @Column(length = 2000) // Add a column for the summary
@@ -81,9 +80,11 @@ public class ChatMessage {
     
     @Column(name = "created_at")
     private Instant timestamp;
-    
-    @Column(name = "is_read")
+      @Column(name = "is_read")
     private boolean read;
+    
+    @Column(name = "tool_call_id")
+    private String toolCallId;
     
     /**
      * Default constructor creating a new message with auto-generated ID and timestamp.
@@ -223,10 +224,17 @@ public class ChatMessage {
     public boolean isRead() {
         return read;
     }
-    
-    public void setRead(boolean read) {
+      public void setRead(boolean read) {
         this.read = read;
-    }    /**
+    }
+    
+    public String getToolCallId() {
+        return toolCallId;
+    }
+    
+    public void setToolCallId(String toolCallId) {
+        this.toolCallId = toolCallId;
+    }/**
      * Creates a ChatMessage instance from an existing Message object.
      * 
      * <p>Static factory method that converts a Message object to a ChatMessage

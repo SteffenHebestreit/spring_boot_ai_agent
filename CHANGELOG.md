@@ -1,6 +1,64 @@
 # Changelog
 
-## [1.4.0] - 2025-06-04 (Current)
+## [1.4.2] - 2025-06-07
+
+### Added - Enhanced Chat Service
+
+**System Message Handling:**
+- **Non-Persistent System Messages:** System messages (AI role definitions) are no longer stored in the database
+- **Dynamic System Message Prepending:** System messages are now dynamically added by OpenAIService before LLM calls
+- **Timestamp Inclusion:** Current timestamp is appended to system messages for temporal context
+
+**Empty Response Handling:**
+- **Empty Response Detection:** Added detection for AI responses that become empty after filtering tool-related content
+- **Frontend Error Notification:** System now sends JSON error messages to frontend when responses are empty after filtering
+- **Improved User Experience:** Clearer feedback when AI generates only tool calls with no actual content
+
+**Message Model Enhancement:**
+- **LLM ID Tracking:** Added `llmId` field to Message model to track which LLM generated each response
+- **Attribution Support:** Better support for multi-LLM environments where different models handle different messages
+
+**Test Improvements:**
+- **Updated ChatControllerTest:** Test now checks for proper error handling when responses are empty after filtering
+- **Refactored ChatServiceTest:** Updated to reflect that system messages are no longer stored in chat history
+
+### Fixed - Message Content Handling
+
+- **Tool Content Filtering:** Improved filtering using more comprehensive ContentFilterUtil.filterForDatabase method
+- **Empty Message Prevention:** Better prevention of empty messages being saved to the database
+- **Stream Error Signaling:** Frontend now receives proper error notification rather than silent failures
+
+## [1.4.1] - 2025-06-06
+
+### Fixed - Chat Message Flow Issues
+
+**User Message Persistence:**
+- **Critical Fix:** Resolved issue where user messages weren't being saved after the first message in chats
+- **Streaming Endpoint Enhancement:** Added automatic user message persistence in streaming endpoint
+- **API Flow Support:** Backend now properly handles frontend API call sequences in any order
+- **Message Deduplication:** Enhanced duplicate detection to prevent message duplication
+
+**Duplicate Detection Improvements:**
+- **Substring Matching:** Added substring comparison for similar AI responses to prevent duplicates
+- **Role-Based Matching:** Improved matching logic based on message roles
+- **Enhanced Logging:** Better reporting of why messages are considered duplicates
+
+**Transaction Management:**
+- **Transaction Isolation:** Maintained explicit transaction boundaries for message operations
+- **Error Handling:** Better error recovery in message persistence operations
+
+### Added - Testing & Documentation
+
+**Test Coverage:**
+- **ChatMessageFlowTest:** Added tests for verifying user message persistence during streaming
+- **Duplicate Detection Tests:** Added tests for verifying enhanced duplicate detection
+
+**Documentation:**
+- **Technical Guides:** Added documentation for the message saving fix implementation
+- **Testing Guides:** Created manual testing guide for verifying the fix
+- **Integration Options:** Added documentation on frontend integration options with the new behavior
+
+## [1.4.0] - 2025-06-04
 
 ### Added - Advanced MCP Session Management & Webcrawl-MCP Compatibility
 

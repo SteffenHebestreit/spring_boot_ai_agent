@@ -76,7 +76,10 @@ public class Message {
     private Object content;
     
     private Map<String, Object> metadata;
-    private Instant timestamp;    /**
+    private Instant timestamp;
+    private String llmId; // Added field for LLM ID
+
+    /**
      * Default constructor creating a new message with metadata and timestamp.
      * 
      * <p>Initializes a new message with an empty metadata map for extensible
@@ -198,5 +201,14 @@ public class Message {
 
     public void setTimestamp(Instant timestamp) {
         this.timestamp = timestamp;
+    }
+
+    // Getter and Setter for llmId
+    public String getLlmId() {
+        return llmId;
+    }
+
+    public void setLlmId(String llmId) {
+        this.llmId = llmId;
     }
 }
