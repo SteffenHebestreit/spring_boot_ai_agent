@@ -71,9 +71,11 @@ public class ChatMessage {
     private String role;
       @Column(name = "content_type")
     private String contentType;
-    
-    @Column(length = 30000) // Increased column size to handle larger LLM messages (up to 30K characters)
+      @Column(length = 30000) // Increased column size to handle larger LLM messages (up to 30K characters)
     private String content;
+
+    @Column(name = "raw_content", length = 30000) // Store unfiltered LLM output with think tags
+    private String rawContent; // Field to store the raw, unfiltered LLM output
 
     @Column(length = 2000) // Add a column for the summary
     private String summary; // Field to store the summary of the content
@@ -203,14 +205,20 @@ public class ChatMessage {
         } else {
             this.content = null;
         }
-    }
-
-    public String getSummary() {
+    }    public String getSummary() {
         return summary;
     }
 
     public void setSummary(String summary) {
         this.summary = summary;
+    }
+    
+    public String getRawContent() {
+        return rawContent;
+    }
+    
+    public void setRawContent(String rawContent) {
+        this.rawContent = rawContent;
     }
     
     public Instant getTimestamp() {
