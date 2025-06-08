@@ -15,6 +15,7 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 
+import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -90,11 +91,25 @@ public class OpenAIService {
         this.objectMapper = objectMapper;
     }
 
+    @PostConstruct
+    public void init() {
+        logger.debug("=== OpenAIService Initialization ===");
+        logger.debug("System Role value: '{}'", openAIProperties.getSystemRole());
+        logger.debug("System Role length: {}", openAIProperties.getSystemRole() != null ? openAIProperties.getSystemRole().length() : "null");
+        logger.debug("Base URL: {}", openAIProperties.getBaseurl());
+        logger.debug("Model: {}", openAIProperties.getModel());
+        logger.debug("=====================================");
+    }
+
     private List<Map<String, Object>> prepareMessagesForLlm(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
         List<Map<String, Object>> messagesForLlm = new ArrayList<>();
 
         // Prepend the system role message
         String systemRole = openAIProperties.getSystemRole();
+        logger.info("DEBUG: Current systemRole value: '{}'", systemRole);
+        logger.info("DEBUG: systemRole null check: {}, empty check: {}", 
+            systemRole == null, systemRole != null ? systemRole.isEmpty() : "null");
+        
         if (systemRole != null && !systemRole.isEmpty()) {
             Map<String, Object> systemMessageMap = new HashMap<>();
             systemMessageMap.put("role", "system");
@@ -104,6 +119,8 @@ public class OpenAIService {
             messagesForLlm.add(systemMessageMap);
             logger.debug("Prepended system message to LLM request: {}", 
                 timeAppendedSystemRole.substring(0, Math.min(100, timeAppendedSystemRole.length())) + "...");
+        } else {
+            logger.warn("WARNING: System role is null or empty! No system message will be sent to LLM!");
         }
 
         if (conversationMessages != null) {
@@ -1238,8 +1255,7 @@ public class OpenAIService {
                 .bodyToMono(String.class)
                 .doOnError(e -> logger.error("Error making reactive non-streaming completion request", e));
     }
-    
-    /**
+      /**
      * Continues the conversation after tool execution within the same reactive context.
      */    private void continueConversationAfterTools(
         List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
@@ -1248,7 +1264,24 @@ public class OpenAIService {
         java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
         
         // Build messages for LLM including the tool results
+        // IMPORTANT: Start with system message by using prepareMessagesForLlm for system message only
         List<Map<String, Object>> messagesForLlm = new ArrayList<>();
+        
+        // Add system message first (like prepareMessagesForLlm does)
+        String systemRole = openAIProperties.getSystemRole();
+        if (systemRole != null && !systemRole.isEmpty()) {
+            Map<String, Object> systemMessageMap = new HashMap<>();
+            systemMessageMap.put("role", "system");
+            String timeAppendedSystemRole = systemRole + " Current time: " + java.time.Instant.now().toString() + ".";
+            systemMessageMap.put("content", timeAppendedSystemRole);
+            messagesForLlm.add(systemMessageMap);
+            logger.debug("Added system message to continuation request: {}", 
+                timeAppendedSystemRole.substring(0, Math.min(100, timeAppendedSystemRole.length())) + "...");
+        } else {
+            logger.warn("WARNING: System role is null or empty in continuation request! No system message will be sent to LLM!");
+        }
+        
+        // Now add all conversation messages including tool results
         for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : messages) {
             Map<String, Object> llmMessage = new HashMap<>();
             String role = msg.getRole();

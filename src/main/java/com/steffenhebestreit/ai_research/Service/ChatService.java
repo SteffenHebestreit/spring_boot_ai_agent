@@ -173,4 +173,17 @@ public class ChatService {
         });
         chatMessageRepository.saveAll(messages);
     }
+
+    /**
+     * Update the raw content of a message
+     */
+    @Transactional
+    public void updateMessageRawContent(String messageId, String rawContent) {
+        Optional<ChatMessage> messageOpt = chatMessageRepository.findById(messageId);
+        if (messageOpt.isPresent()) {
+            ChatMessage message = messageOpt.get();
+            message.setRawContent(rawContent);
+            chatMessageRepository.save(message);
+        }
+    }
 }

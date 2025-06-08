@@ -1,0 +1,5 @@
+{
+  "role": "user",
+  "contentType": "text/plain",
+  "content": "<think>This is a test message with think tags that should be filtered but stored as raw content</think>Hello, this is a test message to verify raw content storage works properly."
+}

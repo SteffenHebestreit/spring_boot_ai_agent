@@ -48,6 +48,7 @@ This project, "AI Research Project," is a Spring Boot application designed for A
   - **Real-time tool feedback** - Stream progress and results of tool execution
   - **Enhanced error handling** - Provides clear error messages for empty responses after tool calls
   - **Non-persistent system prompts** - System messages are dynamically added by the AI service rather than stored in chat history
+  - **Raw content storage** - Dual-storage system preserving both filtered content for display and unfiltered LLM output for transparency and debugging
 - Peer-to-peer communication with other A2A (Agent-to-Agent) agents
 - RESTful APIs for interaction
 - Streaming capabilities for real-time data/task updates
@@ -375,6 +376,16 @@ Base Path: `/research-agent/api/chats`
     *   Description: Get all messages for a specific chat and marks the chat as read.
     *   Parameters: `chatId` (Path Variable) - The ID of the chat.
     *   Response: JSON object containing a "result" key with a list of `ChatMessage` objects.
+*   **`GET /{chatId}/messages/{messageId}/raw`**
+    *   Description: Retrieve the raw, unfiltered content of a specific message. Returns both the filtered content (displayed in chat) and the raw LLM output including think tags and internal reasoning.
+    *   Parameters: 
+        * `chatId` (Path Variable) - The ID of the chat
+        * `messageId` (Path Variable) - The ID of the specific message
+    *   Response: JSON object containing:
+        * `messageId` - The message identifier
+        * `rawContent` - The original unfiltered LLM output (may include think tags)
+        * `filteredContent` - The content displayed in the chat interface
+        * `hasRawContent` - Boolean indicating if raw content is available
 *   **`GET /admin/test`**
     *   Description: Test endpoint restricted to users with the 'ADMIN' role.
     *   Requires: Authentication and 'ADMIN' role.
@@ -668,6 +679,62 @@ Each API endpoint includes:
 - **Usage Patterns**: Best practices and integration guidelines
 
 This documentation approach ensures developers can quickly understand the system architecture, effectively use the APIs, and maintain high code quality during development and evolution.
+
+### Raw Content Storage
+
+The application implements a dual-storage system for AI responses that preserves both filtered content for display and unfiltered LLM output for transparency and debugging purposes.
+
+**Key Features:**
+- **Dual Storage System**: Stores both filtered content (for display) and raw content (including think tags)
+- **Security Validation**: Ensures only filtered content is sent to LLM providers, preventing think tags from being transmitted externally
+- **Transparency**: Preserves complete LLM outputs including internal reasoning and tool execution details
+- **Debugging Support**: Enables analysis of full LLM responses for troubleshooting and optimization
+- **API Access**: Dedicated endpoint for retrieving raw content when needed
+
+**Implementation Details:**
+
+**Database Schema:**
+- Added `raw_content` field to `ChatMessage` entity with 30,000 character limit
+- Automatic raw content storage when filtering occurs during message creation
+
+**API Integration:**
+- `POST /chats/create` - Automatically saves raw content when think tags are filtered
+- `POST /chats/{chatId}/messages` - Saves raw content for manually added messages  
+- `POST /chats/{chatId}/message/stream` - Preserves raw streaming responses
+- `GET /chats/{chatId}/messages/{messageId}/raw` - Retrieves raw content for debugging
+
+**Content Filtering Flow:**
+1. Original LLM output contains think tags and internal reasoning
+2. Content is filtered using `ContentFilterUtil.filterForDatabase()` for display
+3. If filtering occurs, both versions are stored:
+   - `content` field: Filtered version for chat display
+   - `rawContent` field: Original unfiltered output
+4. Only filtered content is used when communicating with LLM providers
+
+**Security Considerations:**
+- **External Communication**: The `prepareMessagesForLlm()` method uses `msg.getContent()` (filtered content) when sending messages to LLM providers
+- **Think Tag Protection**: Think tags and raw content are never transmitted to external LLM services
+- **Internal Use Only**: Raw content is accessible only through dedicated API endpoints for debugging
+
+**Use Cases:**
+- **Debugging**: Analyze complete LLM responses to troubleshoot unexpected behavior
+- **Transparency**: Understand the full reasoning process behind AI responses
+- **Development**: Monitor and improve system prompts based on internal reasoning
+- **Quality Assurance**: Verify that think tags and internal content are properly filtered
+
+**Example Raw Content Response:**
+```json
+{
+  "result": {
+    "messageId": "msg-123",
+    "rawContent": "<think>I need to analyze this request carefully...</think>Here is my response to your question.",
+    "filteredContent": "Here is my response to your question.",
+    "hasRawContent": true
+  }
+}
+```
+
+This feature ensures complete transparency in AI interactions while maintaining security and proper content filtering for both display and external API communications.
 
 ## Contributing
 

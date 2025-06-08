@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * REST Controller for managing chat sessions and conversations.
@@ -159,11 +160,11 @@ public class ChatController {    private static final Logger logger = LoggerFact
      * @param initialMessage The initial message to start the chat with
      * @return ResponseEntity with JSON-RPC response containing the created chat (HTTP 201)
      * @throws IllegalArgumentException if initialMessage is invalid
-     */    @PostMapping("/create")
-    public ResponseEntity<Map<String, Object>> createChat(@RequestBody Message initialMessage) {        try {
+     */    @PostMapping("/create")    public ResponseEntity<Map<String, Object>> createChat(@RequestBody Message initialMessage) {        try {
+            String originalContent = null;
             // Filter the initial message content to remove thinking tags and ensure it fits database constraints
             if (initialMessage.getContent() != null && initialMessage.getContent() instanceof String) {
-                String originalContent = (String) initialMessage.getContent();
+                originalContent = (String) initialMessage.getContent();
                 String filteredContent = ContentFilterUtil.filterForDatabase(originalContent);
                 initialMessage.setContent(filteredContent);
                 logger.debug("Filtered initial message content, original length: {}, filtered length: {}", 
@@ -171,6 +172,16 @@ public class ChatController {    private static final Logger logger = LoggerFact
             }
             
             Chat chat = chatService.createChat(initialMessage); // This saves the initial user message
+            
+            // Save raw content if filtering occurred
+            if (originalContent != null && !originalContent.equals(initialMessage.getContent())) {
+                List<ChatMessage> messages = chat.getMessages();
+                if (!messages.isEmpty()) {
+                    ChatMessage lastMessage = messages.get(messages.size() - 1);
+                    chatService.updateMessageRawContent(lastMessage.getId(), originalContent);
+                    logger.debug("Saved raw content for message {} in chat creation", lastMessage.getId());
+                }
+            }
             
             Map<String, Object> response = new HashMap<>();
             response.put("result", chat); // chat now contains only the initial user message
@@ -209,11 +220,11 @@ public class ChatController {    private static final Logger logger = LoggerFact
      * @return ResponseEntity with JSON-RPC response containing updated chat
      * @throws RuntimeException if chat is not found
      * @throws IllegalArgumentException if message format is invalid
-     */    @PostMapping("/{chatId}/messages")
-    public ResponseEntity<Map<String, Object>> addMessageToChat(@PathVariable String chatId, @RequestBody Message message) {        try {
+     */    @PostMapping("/{chatId}/messages")    public ResponseEntity<Map<String, Object>> addMessageToChat(@PathVariable String chatId, @RequestBody Message message) {        try {
+            String originalContent = null;
             // Filter the message content to remove thinking tags and ensure it fits database constraints
             if (message.getContent() != null && message.getContent() instanceof String) {
-                String originalContent = (String) message.getContent();
+                originalContent = (String) message.getContent();
                 String filteredContent = ContentFilterUtil.filterForDatabase(originalContent);
                 message.setContent(filteredContent);
                 logger.debug("Filtered message content for chat {}, original length: {}, filtered length: {}", 
@@ -223,6 +234,17 @@ public class ChatController {    private static final Logger logger = LoggerFact
             }
             
             Chat chat = chatService.addMessageToChat(chatId, message);
+            
+            // Save raw content if filtering occurred
+            if (originalContent != null && !originalContent.equals(message.getContent())) {
+                List<ChatMessage> messages = chat.getMessages();
+                if (!messages.isEmpty()) {
+                    ChatMessage lastMessage = messages.get(messages.size() - 1);
+                    chatService.updateMessageRawContent(lastMessage.getId(), originalContent);
+                    logger.debug("Saved raw content for message {} in chat {}", lastMessage.getId(), chatId);
+                }
+            }
+            
             Map<String, Object> response = new HashMap<>();
             response.put("result", chat);
             return ResponseEntity.ok(response);
@@ -367,13 +389,23 @@ public class ChatController {    private static final Logger logger = LoggerFact
                 if (autoSaveResponse) {
                     if (effectivelyEmpty && wasOriginallyContent) { // Only error if there was content and it all got filtered out
                         logger.info("AI response for chat {} was empty after filtering tool-related content. Not saving. Signaling error to frontend.", chatId);
-                        return Flux.error(new RuntimeException("AI response was empty after filtering tool-related content."));
-                    } else if (!effectivelyEmpty) { // Save only if there's something to save
+                        return Flux.error(new RuntimeException("AI response was empty after filtering tool-related content."));                    } else if (!effectivelyEmpty) { // Save only if there's something to save
                         try {
                             Message agentMessage = new Message("agent", "text/plain", filteredResponse);
                             agentMessage.setLlmId(modelToUse); // Set the LLM ID
-                            chatService.addMessageToChat(chatId, agentMessage);
-                            logger.info("Saved agent response for chat {} with LLM: {}", chatId, modelToUse);
+                            
+                            // Save both filtered and raw content
+                            Chat updatedChat = chatService.addMessageToChat(chatId, agentMessage);
+                            
+                            // Now update the last message with raw content
+                            if (updatedChat != null && !updatedChat.getMessages().isEmpty()) {
+                                ChatMessage lastMessage = updatedChat.getMessages().get(updatedChat.getMessages().size() - 1);
+                                if (lastMessage != null && "agent".equals(lastMessage.getRole())) {
+                                    chatService.updateMessageRawContent(lastMessage.getId(), fullResponse);
+                                    logger.info("Saved agent response for chat {} with LLM: {} (filtered: {} chars, raw: {} chars)", 
+                                              chatId, modelToUse, filteredResponse.length(), fullResponse.length());
+                                }
+                            }
                         } catch (Exception e) {
                             logger.error("Error saving streamed response to chat history for chat ID {}: {}", chatId, e.getMessage(), e);
                             // Optionally, convert this to a stream error if critical
@@ -530,6 +562,58 @@ public class ChatController {    private static final Logger logger = LoggerFact
                     .body(createErrorResponse(-32602, e.getMessage()));
         }
     }    /**
+     * Retrieves the raw content of a specific message.
+     * 
+     * <p>Fetches the unfiltered LLM output for a message, including think tags
+     * and other internal reasoning content that was filtered out before database storage.
+     * This is useful for debugging, transparency, and understanding the full LLM response.</p>
+     * 
+     * <h3>Response Content:</h3>
+     * <ul>
+     * <li>Raw LLM output with think tags</li>
+     * <li>Tool execution messages</li>
+     * <li>Internal reasoning content</li>
+     * </ul>
+     * 
+     * @param chatId The unique identifier of the chat
+     * @param messageId The unique identifier of the message
+     * @return ResponseEntity with JSON-RPC response containing raw content or error
+     */
+    @GetMapping("/{chatId}/messages/{messageId}/raw")
+    public ResponseEntity<Map<String, Object>> getMessageRawContent(
+            @PathVariable String chatId, 
+            @PathVariable String messageId) {
+        try {
+            Optional<ChatMessage> messageOpt = chatService.getChatMessages(chatId)
+                    .stream()
+                    .filter(msg -> msg.getId().equals(messageId))
+                    .findFirst();
+            
+            if (messageOpt.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(createErrorResponse(-32602, "Message not found with ID: " + messageId + " in chat: " + chatId));
+            }
+            
+            ChatMessage message = messageOpt.get();
+            String rawContent = message.getRawContent();
+            
+            Map<String, Object> response = new HashMap<>();
+            Map<String, Object> result = new HashMap<>();
+            result.put("messageId", messageId);
+            result.put("rawContent", rawContent != null ? rawContent : message.getContent());
+            result.put("filteredContent", message.getContent());
+            result.put("hasRawContent", rawContent != null);
+            response.put("result", result);
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            logger.error("Error retrieving raw content for message {} in chat {}: {}", messageId, chatId, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse(-32000, "Error retrieving raw content: " + e.getMessage()));
+        }
+    }
+
+    /**
      * Test endpoint for administrative users.
      * 
      * <p>Security-protected endpoint that requires ADMIN role authentication.
