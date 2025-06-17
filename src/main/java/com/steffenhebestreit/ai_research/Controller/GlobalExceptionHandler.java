@@ -37,14 +37,13 @@ public class GlobalExceptionHandler {
      * 
      * @param ex The MaxUploadSizeExceededException that was thrown
      * @return ResponseEntity with error details and HTTP 400 status
-     */
-    @ExceptionHandler(MaxUploadSizeExceededException.class)
+     */    @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<Map<String, Object>> handleMaxUploadSizeExceededException(
             MaxUploadSizeExceededException ex) {
         
         Map<String, Object> errorResponse = new HashMap<>();
         errorResponse.put("error", "File size exceeded the maximum allowed upload size");
-        errorResponse.put("details", "Images must be under 10MB and PDF documents under 20MB");
+        errorResponse.put("details", "Images must be under 10MB and PDF documents under 20MB. The overall request must be under 25MB.");
         errorResponse.put("message", ex.getMessage());
         
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);

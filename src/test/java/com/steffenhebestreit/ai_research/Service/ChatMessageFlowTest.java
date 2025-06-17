@@ -1,5 +1,6 @@
 package com.steffenhebestreit.ai_research.Service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.steffenhebestreit.ai_research.Configuration.OpenAIProperties;
 import com.steffenhebestreit.ai_research.Controller.ChatController;
 import com.steffenhebestreit.ai_research.Model.Chat;
@@ -31,9 +32,7 @@ import static org.mockito.Mockito.*;
  */
 @SpringBootTest
 @ActiveProfiles("test")
-public class ChatMessageFlowTest {
-
-    @Mock
+public class ChatMessageFlowTest {    @Mock
     private ChatService chatService;
 
     @Mock
@@ -41,13 +40,16 @@ public class ChatMessageFlowTest {
     
     @Mock
     private OpenAIProperties openAIProperties;
+      @Mock
+    private MultimodalContentProcessingService multimodalContentProcessingService;
 
-    private ChatController chatController;
+    @Mock
+    private ObjectMapper objectMapper;
 
-    @BeforeEach
+    private ChatController chatController;    @BeforeEach
     public void setup() {
         // Initialize controller with mocks
-        chatController = new ChatController(chatService, openAIService, openAIProperties);
+        chatController = new ChatController(chatService, openAIService, openAIProperties, multimodalContentProcessingService, objectMapper);
         
         // Setup default behaviors
         when(openAIProperties.getModel()).thenReturn("gpt-4");

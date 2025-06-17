@@ -5,9 +5,12 @@ import com.steffenhebestreit.ai_research.Model.ChatMessage;
 import com.steffenhebestreit.ai_research.Model.Message;
 import com.steffenhebestreit.ai_research.Model.Task;
 import com.steffenhebestreit.ai_research.Service.ChatService;
+import com.steffenhebestreit.ai_research.Service.MultimodalContentProcessingService;
 import com.steffenhebestreit.ai_research.Service.OpenAIService;
 import com.steffenhebestreit.ai_research.Service.TaskService;
 import com.steffenhebestreit.ai_research.Util.ContentFilterUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -108,9 +111,12 @@ import java.util.Map;
 @RestController
 @RequestMapping("/research-agent/api")
 public class TaskController {
-      private final TaskService taskService;
+    private static final Logger logger = LoggerFactory.getLogger(TaskController.class);
+    
+    private final TaskService taskService;
     private final OpenAIService openAIService;
     private final ChatService chatService;
+    private final MultimodalContentProcessingService multimodalContentProcessingService;
     
     @Value("${openai.api.model}")
     private String defaultLlmId;
@@ -121,12 +127,15 @@ public class TaskController {
      * @param taskService Service for task management operations
      * @param openAIService Service for AI model interactions
      * @param chatService Service for chat session management
+     * @param multimodalContentProcessingService Service for processing multimodal content
      */
-    public TaskController(TaskService taskService, OpenAIService openAIService, ChatService chatService) {
+    public TaskController(TaskService taskService, OpenAIService openAIService, ChatService chatService, 
+            MultimodalContentProcessingService multimodalContentProcessingService) {
         this.taskService = taskService;
         this.openAIService = openAIService;
         this.chatService = chatService;
-    }    /**
+        this.multimodalContentProcessingService = multimodalContentProcessingService;
+    }/**
      * Simple synchronous chat endpoint for direct AI interactions.
      * 
      * <p>Creates a new chat session with the provided user message, generates an AI response,
@@ -145,26 +154,60 @@ public class TaskController {
      * @return ResponseEntity containing the AI's response text
      * @throws IllegalArgumentException if userMessage is null or empty
      * @see #chatStream(String) for streaming alternative
-     */
-    @PostMapping(value = "/chat", consumes = MediaType.TEXT_PLAIN_VALUE, produces = MediaType.TEXT_PLAIN_VALUE)
+     */    @PostMapping(value = "/chat", consumes = MediaType.TEXT_PLAIN_VALUE, produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> chat(@RequestBody String userMessage) {
         try {
             // Create a new chat with the user message
             Message userMsg = new Message("user", "text/plain", userMessage);
             Chat chat = chatService.createChat(userMsg);
             
-            // Get AI response
-            String aiResponse = openAIService.getChatCompletion(userMessage);
+            // Get the conversation history (which will have the user message we just added)
+            List<ChatMessage> conversationHistory = chatService.getChatMessages(chat.getId());
             
-            // Add the AI response to the chat history
-            Message agentMsg = new Message("agent", "text/plain", aiResponse);
-            chatService.addMessageToChat(chat.getId(), agentMsg);
-            
-            return ResponseEntity.ok(aiResponse);
+            // Check for multimodal content and optimize if present
+            boolean hasMultimodalContent = conversationHistory.stream()
+                .anyMatch(msg -> "multipart/mixed".equals(msg.getContentType()));
+                
+            if (hasMultimodalContent) {
+                logger.info("Detected multimodal content in chat history - optimizing context by converting to text-only");
+                List<Message> optimizedHistory = multimodalContentProcessingService.convertToTextOnlyHistory(
+                    conversationHistory, 
+                    -1  // Convert ALL messages to text-only
+                );
+                
+                // Use optimized history for AI request
+                String aiResponse = openAIService.getChatCompletion(
+                    optimizedHistory.stream()
+                        .map(msg -> {
+                            String content = (msg.getContent() instanceof String) 
+                                ? (String) msg.getContent() 
+                                : msg.getContent().toString();
+                            return new ChatMessage(msg.getRole(), content);
+                        })
+                        .toList(),
+                    defaultLlmId
+                );
+                
+                // Add the AI response to the chat history
+                Message agentMsg = new Message("agent", "text/plain", aiResponse);
+                chatService.addMessageToChat(chat.getId(), agentMsg);
+                
+                return ResponseEntity.ok(aiResponse);
+            } else {
+                // Regular text-only processing
+                String aiResponse = openAIService.getChatCompletion(userMessage);
+                
+                // Add the AI response to the chat history
+                Message agentMsg = new Message("agent", "text/plain", aiResponse);
+                chatService.addMessageToChat(chat.getId(), agentMsg);
+                
+                return ResponseEntity.ok(aiResponse);
+            }
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Error processing your request.");
+            logger.error("Error processing chat request: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Error processing your request: " + e.getMessage());
         }
-    }    
+    }
     /**
      * Streaming chat endpoint for real-time AI interactions.
      * 
@@ -198,14 +241,38 @@ public class TaskController {
         if (userMessage == null || userMessage.trim().isEmpty()) {
             return Flux.error(new IllegalArgumentException("User message cannot be empty"));
         }
-        try {
-            // Create a new chat with the user message
+        try {            // Create a new chat with the user message
             Message userMsg = new Message("user", "text/plain", userMessage);
             Chat chat = chatService.createChat(userMsg);
             
             // Get the conversation history (which will have the user message we just added)
             List<ChatMessage> conversationHistory = chatService.getChatMessages(chat.getId());
-              // StringBuilder to accumulate the response
+            
+            // Check for multimodal content and optimize if present
+            boolean hasMultimodalContent = conversationHistory.stream()
+                .anyMatch(msg -> "multipart/mixed".equals(msg.getContentType()));
+                
+            if (hasMultimodalContent) {
+                logger.info("Detected multimodal content in task chat history - optimizing context by converting to text-only");
+                List<Message> optimizedHistory = multimodalContentProcessingService.convertToTextOnlyHistory(
+                    conversationHistory, 
+                    -1  // Convert ALL messages to text-only
+                );
+                
+                // Replace the conversation history with optimized version
+                conversationHistory = optimizedHistory.stream()
+                    .map(msg -> {
+                        String content = (msg.getContent() instanceof String) 
+                            ? (String) msg.getContent() 
+                            : msg.getContent().toString();
+                        return new ChatMessage(msg.getRole(), content);
+                    })
+                    .toList();
+                
+                logger.info("Using optimized text-only history with {} messages for task execution", conversationHistory.size());
+            }
+              
+            // StringBuilder to accumulate the response
             StringBuilder responseAggregator = new StringBuilder();
             
             // Get and return the streaming response

@@ -36,15 +36,28 @@ public class WebClientConfig {
      * premature connection closures.</p>
      * 
      * @return A WebClient.Builder with custom timeout settings
-     */
-    @Bean
+     */    @Bean
     public WebClient.Builder webClientBuilder() {
         HttpClient httpClient = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 30000) // 30 seconds connection timeout
                 .responseTimeout(Duration.ofSeconds(360)) // 6 minutes response timeout
+                .keepAlive(true) // Enable keep-alive
+                .option(ChannelOption.SO_KEEPALIVE, true) // Enable TCP keep-alive
+                .option(ChannelOption.TCP_NODELAY, true) // Disable Nagle's algorithm for better latency
                 .doOnConnected(conn -> 
                     conn.addHandlerLast(new ReadTimeoutHandler(360, TimeUnit.SECONDS)) // 6 minutes read timeout
-                        .addHandlerLast(new WriteTimeoutHandler(360, TimeUnit.SECONDS))); // 6 minutes write timeout
+                        .addHandlerLast(new WriteTimeoutHandler(360, TimeUnit.SECONDS))) // 6 minutes write timeout
+                .doOnDisconnected(conn -> {
+                    // Log when connections are closed
+                    System.out.println("Connection disconnected: " + conn);
+                })
+                .doOnError((request, throwable) -> {
+                    // Log connection errors
+                    System.err.println("Connection error for request: " + request + ", error: " + throwable.getMessage());
+                }, (response, throwable) -> {
+                    // Log response errors
+                    System.err.println("Response error: " + response + ", error: " + throwable.getMessage());
+                });
         
         return WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient));

@@ -3,6 +3,7 @@ package com.steffenhebestreit.ai_research.Controller;
 import com.steffenhebestreit.ai_research.Configuration.OpenAIProperties;
 import com.steffenhebestreit.ai_research.Model.ChatMessage;
 import com.steffenhebestreit.ai_research.Service.ChatService;
+import com.steffenhebestreit.ai_research.Service.MultimodalContentProcessingService;
 import com.steffenhebestreit.ai_research.Service.OpenAIService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -33,6 +34,9 @@ class ChatControllerTest {
 
     @Mock 
     private OpenAIProperties openAIProperties;
+    
+    @Mock
+    private MultimodalContentProcessingService multimodalContentProcessingService;
 
     @InjectMocks
     private ChatController chatController;

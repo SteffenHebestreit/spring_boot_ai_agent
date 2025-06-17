@@ -3,7 +3,6 @@ package com.steffenhebestreit.ai_research.Controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.steffenhebestreit.ai_research.Model.Task;
 import com.steffenhebestreit.ai_research.Service.TaskService;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,13 +38,10 @@ class TaskStreamingControllerTest {
     
     @Autowired
     private ObjectMapper objectMapper;
-    
-    @Autowired
+      @Autowired
     private TaskStreamingController controller;
 
-    @BeforeEach
-    void setUp() {
-    }    @Test
+    @Test
     @WithMockUser(username = "user")
     void resubscribe_WithValidTaskId_ShouldReturnEmitter() throws Exception {
         // Given

@@ -62,9 +62,9 @@ public class ChatService {
         }
         
         return chatRepository.save(chat);
-    }/**
+    }    /**
      * Add a message to an existing chat
-     */    @Transactional(propagation = Propagation.REQUIRES_NEW)
+     */    @Transactional
     public Chat addMessageToChat(String chatId, Message message) {
         // Add enhanced logging for debugging message issues
         System.out.println("Adding message to chat " + chatId + " with role: " + message.getRole() + 
@@ -73,47 +73,75 @@ public class ChatService {
                                ((String)message.getContent()).substring(0, Math.min(50, ((String)message.getContent()).length())) + "..." 
                                : "Non-string content"));
         
-        return getChatById(chatId).map(chat -> {
-            // Enhanced duplicate message detection with better logging
-            boolean isDuplicate = false;
-            String duplicateReason = "";
-            
-            for (ChatMessage existingMsg : chat.getMessages()) {
-                // Compare role and content to identify duplicates
+        return getChatById(chatId).map(chat -> {            // Enhanced duplicate message detection with better logging
+            for (ChatMessage existingMsg : chat.getMessages()) {                // Compare role and content to identify duplicates
                 boolean sameRole = existingMsg.getRole().equals(message.getRole());
-                boolean sameContent = false;
+                boolean sameContentType = (existingMsg.getContentType() == null && message.getContentType() == null) ||
+                                          (existingMsg.getContentType() != null && 
+                                           existingMsg.getContentType().equals(message.getContentType()));
                 
-                if (existingMsg.getContent() instanceof String && message.getContent() instanceof String) {
+                boolean sameContent = false;
+                String duplicateReason = null;                // Handle multimodal content comparison
+                if ("multipart/mixed".equals(message.getContentType()) || "multipart/mixed".equals(existingMsg.getContentType())) {
+                    if (message.getContent() != null && existingMsg.getContent() != null) {
+                        // For multimodal content, be more strict about duplicate detection
+                        // Only consider it a duplicate if it's EXACTLY the same content
+                        String existingStr = existingMsg.getContent().toString();
+                        String newStr = message.getContent().toString();
+                        
+                        // Only exact string matches are considered duplicates for multimodal content
+                        // This prevents false positives from similar but different multimodal content
+                        if (existingStr.equals(newStr)) {
+                            sameContent = true;
+                            duplicateReason = "exact multimodal content match";
+                        }
+                        // Additional safeguard: don't consider multimodal content duplicates
+                        // unless they are truly identical (same timestamp, same content)
+                        else if (existingStr.length() > 1000 && newStr.length() > 1000 && 
+                                existingStr.equals(newStr)) {
+                            sameContent = true;
+                            duplicateReason = "identical large multimodal content";
+                        }
+                    }
+                }
+                // Regular string content comparison
+                else if (existingMsg.getContent() instanceof String && message.getContent() instanceof String) {
                     String existingContent = (String) existingMsg.getContent();
                     String newContent = (String) message.getContent();
                     
                     // Check for exact match
                     if (existingContent.equals(newContent)) {
                         sameContent = true;
+                        duplicateReason = "exact content match";
                     }
                     
                     // Check for substring match (for handling truncated responses)
                     // Only for agent/assistant responses which might be saved twice
-                    if (!sameContent && ("agent".equals(message.getRole()) || "assistant".equals(message.getRole()))) {
-                        if (existingContent.length() > 20 && newContent.length() > 20) {
-                            if (existingContent.contains(newContent) || newContent.contains(existingContent)) {
-                                sameContent = true;
-                                duplicateReason = "content substring match";
-                            }
+                    else if (("agent".equals(message.getRole()) || "assistant".equals(message.getRole())) &&
+                            existingContent.length() > 20 && newContent.length() > 20) {
+                        if (existingContent.contains(newContent) || newContent.contains(existingContent)) {
+                            sameContent = true;
+                            duplicateReason = "content substring match";
                         }
                     }
                 }
-                
-                if (sameRole && sameContent) {
-                    isDuplicate = true;
-                    duplicateReason = duplicateReason.isEmpty() ? "exact content match" : duplicateReason;
-                    break;
+                // For non-string content types, compare their string representation
+                else if (existingMsg.getContent() != null && message.getContent() != null) {
+                    if (existingMsg.getContent().toString().equals(message.getContent().toString())) {
+                        sameContent = true;
+                        duplicateReason = "toString match on non-string content";
+                    }
                 }
-            }
-            
-            if (isDuplicate) {
-                System.out.println("DUPLICATE MESSAGE DETECTED! Not saving duplicate message. Reason: " + duplicateReason);
-                return chat; // Return existing chat without adding the duplicate
+                // For null content
+                else if (existingMsg.getContent() == null && message.getContent() == null) {
+                    sameContent = true;
+                    duplicateReason = "both contents null";
+                }
+                  // Message is considered duplicate if role, content type and content match
+                if (sameRole && sameContentType && sameContent) {
+                    System.out.println("DUPLICATE MESSAGE DETECTED! Not saving duplicate message. Reason: " + duplicateReason);
+                    return chat; // Return existing chat without adding the duplicate
+                }
             }
             
             ChatMessage chatMessage = ChatMessage.fromMessage(message);            
@@ -133,13 +161,11 @@ public class ChatService {
             // Then save the chat
             return chatRepository.save(chat);
         }).orElseThrow(() -> new RuntimeException("Chat not found with ID: " + chatId));
-    }
-
-    /**
+    }    /**
      * Get all messages for a specific chat
      */
     public List<ChatMessage> getChatMessages(String chatId) {
-        return chatMessageRepository.findByChatIdOrderByTimestampAsc(chatId);
+        return chatMessageRepository.findByChatIdOrderByCreatedAtAsc(chatId);
     }
 
     /**
@@ -161,13 +187,12 @@ public class ChatService {
     public void deleteChat(String chatId) {
         chatRepository.deleteById(chatId);
     }
-    
-    /**
+      /**
      * Mark all messages in a chat as read
      */
     @Transactional
     public void markChatAsRead(String chatId) {
-        List<ChatMessage> messages = chatMessageRepository.findByChatIdOrderByTimestampAsc(chatId);
+        List<ChatMessage> messages = chatMessageRepository.findByChatIdOrderByCreatedAtAsc(chatId);
         messages.forEach(message -> {
             message.setRead(true);
         });
@@ -185,5 +210,19 @@ public class ChatService {
             message.setRawContent(rawContent);
             chatMessageRepository.save(message);
         }
+    }
+
+    /**
+     * Get recent chats, ordered by most recent first, limited to 10
+     * 
+     * @return List of 10 most recent chats
+     */
+    public List<Chat> getRecentChats(int limit) {
+        if (limit > 10) {
+            limit = 10; // Cap at 10 for performance reasons
+        }
+        List<Chat> recentChats = chatRepository.findTop10ByOrderByCreatedAtDesc();
+        // Return only the requested number
+        return recentChats.subList(0, Math.min(limit, recentChats.size()));
     }
 }

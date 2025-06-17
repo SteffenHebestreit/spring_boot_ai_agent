@@ -1,12 +1,13 @@
 package com.steffenhebestreit.ai_research.Controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.steffenhebestreit.ai_research.Configuration.OpenAIProperties;
 import com.steffenhebestreit.ai_research.Model.Chat;
 import com.steffenhebestreit.ai_research.Model.ChatMessage;
 import com.steffenhebestreit.ai_research.Model.Message;
 import com.steffenhebestreit.ai_research.Service.ChatService;
+import com.steffenhebestreit.ai_research.Service.MultimodalContentProcessingService;
 import com.steffenhebestreit.ai_research.Service.OpenAIService;
-import com.steffenhebestreit.ai_research.Util.ContentFilterUtil;
 import com.steffenhebestreit.ai_research.Util.ContentFilterUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,18 +76,22 @@ public class ChatController {    private static final Logger logger = LoggerFact
     private final ChatService chatService;
     private final OpenAIService openAIService;
     private final OpenAIProperties openAIProperties;
-
-    /**
+    private final MultimodalContentProcessingService multimodalContentProcessingService;
+    private final ObjectMapper objectMapper;    /**
      * Constructs a ChatController with required service dependencies.
      * 
      * @param chatService Service for chat session management and persistence
      * @param openAIService Service for AI model interactions and response generation
      * @param openAIProperties Configuration properties for the OpenAI API
+     * @param multimodalContentProcessingService Service for processing multimodal content and token optimization
+     * @param objectMapper Jackson ObjectMapper for JSON processing
      */
-    public ChatController(ChatService chatService, OpenAIService openAIService, OpenAIProperties openAIProperties) {
+    public ChatController(ChatService chatService, OpenAIService openAIService, OpenAIProperties openAIProperties, MultimodalContentProcessingService multimodalContentProcessingService, ObjectMapper objectMapper) {
         this.chatService = chatService;
         this.openAIService = openAIService;
         this.openAIProperties = openAIProperties;
+        this.multimodalContentProcessingService = multimodalContentProcessingService;
+        this.objectMapper = objectMapper;
     }/**
      * Retrieves all chat sessions in the system.
      * 
@@ -160,7 +165,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
      * @param initialMessage The initial message to start the chat with
      * @return ResponseEntity with JSON-RPC response containing the created chat (HTTP 201)
      * @throws IllegalArgumentException if initialMessage is invalid
-     */    @PostMapping("/create")    public ResponseEntity<Map<String, Object>> createChat(@RequestBody Message initialMessage) {        try {
+     */    @PostMapping("/create")    public ResponseEntity<Map<String, Object>> createChat(@RequestBody Message initialMessage) {          try {
             String originalContent = null;
             // Filter the initial message content to remove thinking tags and ensure it fits database constraints
             if (initialMessage.getContent() != null && initialMessage.getContent() instanceof String) {
@@ -169,8 +174,84 @@ public class ChatController {    private static final Logger logger = LoggerFact
                 initialMessage.setContent(filteredContent);
                 logger.debug("Filtered initial message content, original length: {}, filtered length: {}", 
                     originalContent.length(), filteredContent.length());
+            } else if (initialMessage.getContent() != null && "multipart/mixed".equals(initialMessage.getContentType())) {
+                // Handle multimodal content - convert to proper JSON string representation
+                try {
+                    originalContent = openAIService.convertMultimodalContentToString(initialMessage.getContent());
+                    initialMessage.setContent(originalContent);
+                    logger.debug("Converted multimodal content to JSON string for chat creation, length: {}", 
+                        originalContent.length());
+                } catch (Exception e) {
+                    logger.error("Failed to convert multimodal content to string: {}", e.getMessage(), e);
+                    // Leave content as-is if conversion fails
+                }
             }
             
+            // Check if a recent chat exists with a similar user message to avoid duplicates
+            // This is especially helpful for multimodal requests where the frontend might create multiple chats
+            List<Chat> recentChats = chatService.getRecentChats(10); // Get recent chats to check
+            Chat existingChat = null;
+            
+            for (Chat chat : recentChats) {
+                if (!chat.getMessages().isEmpty()) {
+                    ChatMessage firstMessage = chat.getMessages().get(0);
+                    // Only compare user messages
+                    if ("user".equals(firstMessage.getRole())) {
+                        boolean contentTypesMatch = (firstMessage.getContentType() == null && initialMessage.getContentType() == null) ||
+                                                   (firstMessage.getContentType() != null && 
+                                                    firstMessage.getContentType().equals(initialMessage.getContentType()));
+                          // Enhanced duplicate detection to handle cross-content-type scenarios
+                        if (contentTypesMatch && "multipart/mixed".equals(initialMessage.getContentType())) {
+                            // Special handling for multimodal content - high chance it's a duplicate request
+                            // from frontend if we see a recent multimodal chat
+                            if (System.currentTimeMillis() - chat.getCreatedAt().toEpochMilli() < 10000) { // within 10 seconds
+                                logger.info("Found recent multimodal chat with same content type. Reusing existing chat: {}", chat.getId());
+                                existingChat = chat;
+                                break;
+                            }
+                        }
+                        // For text content, do a more detailed comparison
+                        else if (contentTypesMatch && initialMessage.getContent() instanceof String && 
+                                 firstMessage.getContent() instanceof String) {
+                            String existingContent = (String) firstMessage.getContent();
+                            String newContent = (String) initialMessage.getContent();
+                            
+                            if (existingContent.equals(newContent)) {
+                                logger.info("Found existing chat with identical user message. Reusing existing chat: {}", chat.getId());
+                                existingChat = chat;
+                                break;
+                            }
+                        }                        // CROSS-CONTENT-TYPE MATCHING: Check if incoming text message is already part of existing multimodal message
+                        else if ("text/plain".equals(initialMessage.getContentType()) && 
+                                 "multipart/mixed".equals(firstMessage.getContentType()) &&
+                                 initialMessage.getContent() instanceof String &&
+                                 firstMessage.getContent() instanceof String) {
+                            
+                            String incomingTextContent = (String) initialMessage.getContent();
+                            String existingMultimodalContent = (String) firstMessage.getContent();
+                            
+                            // Use ObjectMapper to properly parse and extract text from multimodal JSON
+                            boolean textFoundInMultimodal = extractTextFromMultimodalJson(existingMultimodalContent, incomingTextContent);
+                            
+                            if (textFoundInMultimodal) {
+                                // Only consider recent chats to avoid false positives
+                                if (System.currentTimeMillis() - chat.getCreatedAt().toEpochMilli() < 30000) { // within 30 seconds
+                                    logger.info("Found existing multimodal chat containing the same text content. Reusing existing chat: {}", chat.getId());
+                                    existingChat = chat;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }            // If we found an existing similar chat, return that instead of creating a new one
+            if (existingChat != null) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("result", existingChat);
+                return ResponseEntity.ok(response); // Return 200 OK instead of 201 Created
+            }
+            
+            // No existing chat found, create a new one
             Chat chat = chatService.createChat(initialMessage); // This saves the initial user message
             
             // Save raw content if filtering occurred
@@ -181,9 +262,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
                     chatService.updateMessageRawContent(lastMessage.getId(), originalContent);
                     logger.debug("Saved raw content for message {} in chat creation", lastMessage.getId());
                 }
-            }
-            
-            Map<String, Object> response = new HashMap<>();
+            }            Map<String, Object> response = new HashMap<>();
             response.put("result", chat); // chat now contains only the initial user message
             
             return ResponseEntity.status(HttpStatus.CREATED).body(response);
@@ -320,14 +399,25 @@ public class ChatController {    private static final Logger logger = LoggerFact
             logger.info("Using LLM model: {} for chat: {}", modelToUse, chatId);
             
             List<ChatMessage> conversationHistory = chatService.getChatMessages(chatId);
-            
-            boolean foundCurrentUserMessage = false;
+              boolean foundCurrentUserMessage = false;
             if (!conversationHistory.isEmpty()) {
                 ChatMessage lastMessage = conversationHistory.get(conversationHistory.size() - 1);
-                if ("user".equals(lastMessage.getRole()) && 
-                    lastMessage.getContent() != null && 
-                    lastMessage.getContent().equals(userMessageContent)) {
-                    foundCurrentUserMessage = true;
+                if ("user".equals(lastMessage.getRole()) && lastMessage.getContent() != null) {
+                    // Check for exact text match (for plain text messages)
+                    if (lastMessage.getContent().equals(userMessageContent)) {
+                        foundCurrentUserMessage = true;
+                    }
+                    // Check for multimodal content that contains the text prompt
+                    else if ("multipart/mixed".equals(lastMessage.getContentType()) && 
+                             lastMessage.getContent() instanceof String) {
+                        String multimodalContent = (String) lastMessage.getContent();
+                        // Check if the multimodal content contains the text prompt
+                        if (multimodalContent.contains("\"text\":\"" + userMessageContent + "\"") ||
+                            multimodalContent.contains("\"text\": \"" + userMessageContent + "\"")) {
+                            foundCurrentUserMessage = true;
+                            logger.debug("Found current user message as part of multimodal content in chat {}", chatId);
+                        }
+                    }
                 }
             }
             if (!foundCurrentUserMessage) {
@@ -337,6 +427,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
                     chatService.addMessageToChat(chatId, userMessage);
                     logger.info("Saved missing user message to chat {} database", chatId);
                     
+                    // Initialize with default constructor then set properties individually
                     ChatMessage tempUserMessage = new ChatMessage();
                     tempUserMessage.setRole("user");
                     tempUserMessage.setContentType("text/plain");
@@ -345,6 +436,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
                     conversationHistory.add(tempUserMessage);
                 } catch (Exception e) {
                     logger.error("Failed to save user message to database for chat {}: {}", chatId, e.getMessage(), e);
+                    // Initialize with default constructor then set properties individually
                     ChatMessage tempUserMessage = new ChatMessage();
                     tempUserMessage.setRole("user");
                     tempUserMessage.setContentType("text/plain");
@@ -353,8 +445,7 @@ public class ChatController {    private static final Logger logger = LoggerFact
                     conversationHistory.add(tempUserMessage); // Add to history for LLM even if DB save fails
                 }
             }
-            
-            logger.info("Streaming message for chat ID: {}. History size: {}", chatId, conversationHistory.size());
+              logger.info("Streaming message for chat ID: {}. History size: {}", chatId, conversationHistory.size());
             if (logger.isDebugEnabled()) {
                 for (int i = 0; i < conversationHistory.size(); i++) {
                     ChatMessage msg = conversationHistory.get(i);
@@ -372,6 +463,31 @@ public class ChatController {    private static final Logger logger = LoggerFact
             if (conversationHistory.isEmpty()) {
                 logger.error("Conversation history for chat {} is empty after attempting to prepare it. This should not happen.", chatId);
                 return Flux.just("{\"error\": \"No conversation history found or could be prepared. Please ensure the user message is saved before streaming.\"}");
+            }
+            
+            // Optimize token usage by converting multimodal content to text-only
+            // This is crucial to prevent sending base64 images repeatedly in the chat context
+            boolean hasMultimodalContent = conversationHistory.stream()
+                .anyMatch(msg -> "multipart/mixed".equals(msg.getContentType()));
+                
+            if (hasMultimodalContent) {
+                logger.info("Detected multimodal content in chat history - optimizing context by converting to text-only");
+                List<Message> optimizedHistory = multimodalContentProcessingService.convertToTextOnlyHistory(
+                    conversationHistory, 
+                    -1  // Convert ALL messages to text-only for streaming
+                );
+                
+                // Replace the conversation history with optimized version
+                conversationHistory = optimizedHistory.stream()
+                    .map(msg -> {
+                        String content = (msg.getContent() instanceof String) 
+                            ? (String) msg.getContent() 
+                            : msg.getContent().toString();
+                        return new ChatMessage(msg.getRole(), content);
+                    })
+                    .toList();
+                
+                logger.info("Using optimized text-only history with {} messages for streaming", conversationHistory.size());
             }
 
             StringBuilder responseAggregator = new StringBuilder();
@@ -670,8 +786,39 @@ public class ChatController {    private static final Logger logger = LoggerFact
         Map<String, Object> errorResponse = new HashMap<>();
         errorResponse.put("error", Map.of(
             "code", code,
-            "message", message
-        ));
+            "message", message        ));
         return errorResponse;
+    }
+    
+    /**
+     * Helper method to properly extract and compare text content from multimodal JSON.
+     * Uses ObjectMapper for robust JSON parsing instead of string matching.
+     */
+    private boolean extractTextFromMultimodalJson(String multimodalJson, String targetText) {
+        try {
+            // Parse the multimodal JSON using ObjectMapper
+            Object[] contentArray = objectMapper.readValue(multimodalJson, Object[].class);
+            
+            for (Object item : contentArray) {
+                if (item instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> itemMap = (Map<String, Object>) item;
+                    String type = (String) itemMap.get("type");
+                    
+                    if ("text".equals(type)) {
+                        String text = (String) itemMap.get("text");
+                        if (text != null && text.equals(targetText)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            logger.warn("Error parsing multimodal JSON for text extraction: {}", e.getMessage());
+            // Fallback to simple string contains check
+            return multimodalJson.contains("\"text\":\"" + targetText + "\"") ||
+                   multimodalJson.contains("\"text\": \"" + targetText + "\"");
+        }
     }
 }
