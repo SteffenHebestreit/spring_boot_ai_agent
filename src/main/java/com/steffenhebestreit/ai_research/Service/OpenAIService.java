@@ -33,6 +33,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+import java.time.Duration;
 
 /**
  * Service for interacting with OpenAI-compatible LLM APIs, including multimodal content processing.
@@ -891,7 +892,7 @@ public class OpenAIService {
         }
         
         List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messagesRef.get());
-
+        
         if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && messagesRef.get().isEmpty())) {
             tryCloseSinkWithError(sink, sinkClosed, new IllegalArgumentException("Cannot send an effectively empty message list to LLM."), modelId, cancellationFlag);
             return;
@@ -959,6 +960,7 @@ public class OpenAIService {
         AtomicReference<String> currentLlmRole = new AtomicReference<>(); // Stores the role from the current LLM delta
         
         String path = "/chat/completions"; // API endpoint path
+        
         logger.info("Initiating streaming request to LLM path: {} for model: {} with {} messages", path, modelId, messagesForLlm.size());
         
         // Log the first few characters of the request body for debugging (without exposing sensitive data)
@@ -973,6 +975,7 @@ public class OpenAIService {
             logger.warn("Failed to serialize request body for logging: {}", e.getMessage());
         }
 
+        // Add timeout and error handling to prevent connection issues
         webClient.post()
                 .uri(path)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
@@ -980,6 +983,7 @@ public class OpenAIService {
                 .bodyValue(requestBody)
                 .retrieve()
                 .bodyToFlux(String.class)
+                .timeout(Duration.ofMinutes(5)) // Add 5 minute timeout for tool execution
                 .doOnSubscribe(sub -> logger.info("Started stream subscription for model: {} with {} messages", modelId, messagesForLlm.size()))
                 .doOnNext(event -> logger.trace("Received raw stream event for model {}: {}", modelId, event))
                 .doOnError(error -> logger.error("Stream error for model {}: {}", modelId, error.getMessage(), error))
@@ -1043,7 +1047,7 @@ public class OpenAIService {
                                                 @SuppressWarnings("unchecked")
                                                 List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) message.get("tool_calls");
                                                 if (toolCalls != null && !toolCalls.isEmpty()) {
-                                                    currentLlmRole.set("tool");
+                                                    currentLlmRole.set("assistant"); // Tool calls come from assistant, not "tool"
                                                     // Process tool calls - this was missing in the previous implementation
                                                     for (Map<String, Object> toolCall : toolCalls) {
                                                         Integer index = toolCall.containsKey("index") ? 
@@ -1094,7 +1098,7 @@ public class OpenAIService {
                                             @SuppressWarnings("unchecked")
                                             List<Map<String, Object>> deltaToolCalls = (List<Map<String, Object>>) deltaToolCallsObj;
                                             if (!deltaToolCalls.isEmpty()) {
-                                                currentLlmRole.set("tool");
+                                                currentLlmRole.set("assistant"); // Tool calls come from assistant
                                                 // Process delta tool calls
                                                 for (Map<String, Object> deltaToolCall : deltaToolCalls) {
                                                     Integer index = deltaToolCall.containsKey("index") ?
@@ -1212,8 +1216,19 @@ public class OpenAIService {
                                     llmConfig.setId(modelId); 
                                 }
                                 
-                                // Use finalToolsForRequest here
+                                // Use finalToolsForRequest here and add safety check for recursive tool calls
                                 final LlmConfiguration finalLlmConfig = llmConfig;
+                                
+                                // Add safety check to prevent infinite tool call loops
+                                long toolCallCount = messagesRef.get().stream()
+                                    .filter(msg -> "assistant".equals(msg.getRole()) && msg.getToolCalls() != null && !msg.getToolCalls().isEmpty())
+                                    .count();
+                                
+                                if (toolCallCount > 10) {
+                                    logger.warn("Tool call limit reached for modelId: {}. Completing conversation to prevent infinite loops.", modelId);
+                                    tryCloseSinkWithCompletion(sink, sinkClosed, modelId, "Tool call limit reached to prevent infinite loops", cancellationFlag);
+                                    return;
+                                }
                                 
                                 // Use the current messages from our AtomicReference
                                 handleToolCallsAndContinue(completedToolCallMaps, messagesRef.get(), modelId, sink, toolSelection, 
@@ -1319,7 +1334,7 @@ public class OpenAIService {
                     if (!validResponses.isEmpty()) {
                         if (!sinkClosed.get()) {
                              for (ChatMessage toolRespMsg : validResponses) {
-                                 String toolResponseMessageContent = String.format("\\n[Tool %s executed. Result (preview): %s]\\n", 
+                                 String toolResponseMessageContent = String.format("\\n[Tool %s executed.]\\n", 
                                                                           toolRespMsg.getName(), 
                                                                           toolRespMsg.getContent() != null ? toolRespMsg.getContent().substring(0, Math.min(100, toolRespMsg.getContent().length())) : "null");
                                  if (!sinkClosed.get()) {

@@ -44,9 +44,12 @@ public class ContentFilterUtil {
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL
     );    /**
      * Regex pattern to match text about tool execution status like:
-     * [Calling tool: X] [Executing tools...] [Tool execution failed: Y] [Tool completed successfully] etc.
-     */    private static final Pattern TOOL_EXECUTION_STATUS_PATTERN = Pattern.compile(
-        "\\[(?:Calling tool|Executing tools?|Tool execution|Tool result|Tool error|Tool failed|Tool execution failed|Tool completed|Tool completed successfully|Continuing conversation|Step [0-9]+|Using tool|Task complete|Task started|Processing|Tool thinking|Tool output|Result|Executing|Tool execution continues)[^\\]]*\\]", 
+     * [Calling tool: X] [Executing tools...] [Tool execution failed: Y] [Tool completed successfully] 
+     * [Tool calls requested by LLM. Executing tools...] etc.
+     * Includes optional surrounding newlines/whitespace to clean up formatting.
+     */
+    private static final Pattern TOOL_EXECUTION_STATUS_PATTERN = Pattern.compile(
+        "\\s*\\n*\\s*\\[(?:Calling tool|Executing tools?|Tool calls requested|Tool execution|Tool result|Tool error|Tool failed|Tool execution failed|Tool completed|Tool completed successfully|Tool started|Tool beginning|Tool ending|Continuing conversation|Step [0-9]+|Using tool|Task complete|Task started|Processing|Tool thinking|Tool output|Result|Executing|Tool execution continues)[^\\]]*\\]\\s*\\n*\\s*", 
         Pattern.CASE_INSENSITIVE
     );
     
@@ -90,13 +93,19 @@ public class ContentFilterUtil {
         filtered = THINK_TAG_PATTERN.matcher(filtered).replaceAll("");
         
         // Remove all <tool_code>...</tool_code> blocks
-        filtered = TOOL_CODE_TAG_PATTERN.matcher(filtered).replaceAll("");
+        filtered = TOOL_CODE_TAG_PATTERN.matcher(filtered).replaceAll("");        // Remove tool execution status messages (with optional surrounding whitespace/newlines)
+        filtered = TOOL_EXECUTION_STATUS_PATTERN.matcher(filtered).replaceAll(" ");
         
-        // Remove tool execution status messages
-        filtered = TOOL_EXECUTION_STATUS_PATTERN.matcher(filtered).replaceAll("");
+        // Fix multiple consecutive newlines and whitespace (common after tool call removal)
+        filtered = filtered.replaceAll("\\n\\s*\\n\\s*\\n+", "\n\n"); // 3+ newlines → 2 newlines
+        filtered = filtered.replaceAll("\\n\\s*\\n\\s*", "\n\n");     // 2+ newlines with whitespace → 2 clean newlines
         
-        // Fix multiple consecutive spaces
-        filtered = filtered.replaceAll("\\s{2,}", " ");
+        // Fix multiple consecutive spaces (but preserve single newlines)
+        filtered = filtered.replaceAll("[ \\t]{2,}", " ");
+        
+        // Clean up edge cases where content might have been joined without proper spacing
+        filtered = filtered.replaceAll("([.!?])([A-Z])", "$1 $2"); // Add space after sentence-ending punctuation before capital letter
+        filtered = filtered.replaceAll("([a-z])([A-Z])", "$1 $2");   // Add space between lowercase and uppercase (word boundaries)
         
         // Trim whitespace
         filtered = filtered.trim();
