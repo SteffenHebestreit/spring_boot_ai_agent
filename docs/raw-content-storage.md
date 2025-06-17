@@ -167,8 +167,9 @@ GET /chats/chat-123/messages/msg-456/raw
 ### Automated Testing
 
 **Test Component**: `RawContentTest.java`
-- **Location**: `src/main/java/com/steffenhebestreit/ai_research/Test/RawContentTest.java`
-- **Purpose**: Verify raw content storage functionality
+- **Location**: `src/test/java/com/steffenhebestreit/ai_research/Manual/RawContentTest.java`
+- **Purpose**: Manual test utility to verify raw content storage functionality
+- **Usage**: Uncomment `@Component` annotation and restart application for testing
 - **Test Flow**:
   1. Create message with think tags
   2. Filter content using `ContentFilterUtil`

@@ -1,8 +1,12 @@
 package com.steffenhebestreit.ai_research.Service;
 
 import com.steffenhebestreit.ai_research.Model.LlmConfiguration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -31,9 +35,13 @@ import java.util.Map;
  */
 @Service
 public class MultimodalContentService {
-
-    private static final long MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
-    private static final long MAX_PDF_SIZE = 20 * 1024 * 1024;   // 20MB
+    private static final Logger logger = LoggerFactory.getLogger(MultimodalContentService.class);
+    
+    @Value("${multimodal.max-image-size:5MB}")
+    private DataSize maxImageSize;
+    
+    @Value("${multimodal.max-pdf-size:10MB}")
+    private DataSize maxPdfSize;
 
     @Autowired
     private LlmCapabilityService llmCapabilityService;/**
@@ -72,10 +80,13 @@ public class MultimodalContentService {
             result.put("error", "Unable to determine file type");
             return result;
         }
-        
-        LlmConfiguration llmConfig = llmCapabilityService.getLlmConfiguration(llmId);
-        if (llmConfig == null) {
-            result.put("error", "Unknown LLM: " + llmId);
+          LlmConfiguration llmConfig = llmCapabilityService.getLlmConfiguration(llmId);
+        if (llmConfig == null) {            // Instead of returning an error, we assume the model is in the process of loading
+            // and set a special flag to indicate this situation
+            logger.info("Model {} not found in current configuration, assuming it's still loading", llmId);
+            result.put("valid", true);  // Allow the request to proceed
+            result.put("modelLoading", true);  // Indicate that the model is likely still loading
+            result.put("message", "Note: Model " + llmId + " appears to be initializing. The request will be processed, but may take longer than usual.");
             return result;
         }
         
@@ -84,10 +95,8 @@ public class MultimodalContentService {
             if (!llmConfig.isSupportsImage()) {
                 result.put("error", "The selected LLM '" + llmConfig.getName() + "' does not support image inputs");
                 return result;
-            }
-            
-            if (file.getSize() > MAX_IMAGE_SIZE) {
-                result.put("error", "Image size exceeds maximum allowed (" + (MAX_IMAGE_SIZE / (1024 * 1024)) + "MB)");
+            }            if (file.getSize() > maxImageSize.toBytes()) {
+                result.put("error", "Image size exceeds maximum allowed (" + maxImageSize.toMegabytes() + "MB)");
                 return result;
             }
         } 
@@ -96,10 +105,8 @@ public class MultimodalContentService {
             if (!llmConfig.isSupportsPdf()) {
                 result.put("error", "The selected LLM '" + llmConfig.getName() + "' does not support PDF inputs");
                 return result;
-            }
-            
-            if (file.getSize() > MAX_PDF_SIZE) {
-                result.put("error", "PDF size exceeds maximum allowed (" + (MAX_PDF_SIZE / (1024 * 1024)) + "MB)");
+            }              if (file.getSize() > maxPdfSize.toBytes()) {
+                result.put("error", "PDF size exceeds maximum allowed (" + maxPdfSize.toMegabytes() + "MB)");
                 return result;
             }
         } else {

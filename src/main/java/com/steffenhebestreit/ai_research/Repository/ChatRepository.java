@@ -95,4 +95,16 @@ public interface ChatRepository extends JpaRepository<Chat, String> {
      * @see Chat#getLastMessage()
      */
     List<Chat> findAllByOrderByUpdatedAtDesc();
+    
+    /**
+     * Retrieves the specified number of most recent chats ordered by creation timestamp.
+     * 
+     * <p>Finds the most recent Chat entities based on their creation timestamp and returns 
+     * them in descending order (newest first). This method is particularly useful for finding
+     * recently created chats to check for potential duplicates or continue recent conversations.</p>
+     * 
+     * @param limit The maximum number of chats to return
+     * @return List of most recent chats, limited by the specified count
+     */
+    List<Chat> findTop10ByOrderByCreatedAtDesc();
 }

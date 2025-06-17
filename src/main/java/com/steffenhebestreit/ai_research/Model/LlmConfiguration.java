@@ -20,6 +20,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *   <li><strong>Text Processing</strong> - Standard text input support (enabled by default)</li>
  *   <li><strong>Vision Capabilities</strong> - Image analysis and multimodal understanding</li>
  *   <li><strong>Document Processing</strong> - PDF parsing and document comprehension</li>
+ *   <li><strong>Function Calling</strong> - Ability to use tools or functions</li>
+ *   <li><strong>JSON Mode</strong> - Ability to output JSON</li>
  * </ul>
  * 
  * <h3>Builder Pattern Support:</h3>
@@ -33,7 +35,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * a nested capabilities object optimized for JSON responses.
  * 
  * @author Steffen Hebestreit
- * @version 1.0
+ * @version 1.1
  * @since 1.0
  * @see com.steffenhebestreit.ai_research.Model.Message
  * @see com.steffenhebestreit.ai_research.Model.ChatMessage
@@ -82,6 +84,33 @@ public class LlmConfiguration {
      */
     private boolean supportsPdf = false;
       /**
+     * Indicates whether the model supports function calling (tool use).
+     * This capability is {@code false} by default and must be explicitly enabled.
+     */
+    private boolean supportsFunctionCalling = false;
+
+    /**
+     * Indicates whether the model supports JSON mode for output.
+     * This capability is {@code false} by default and must be explicitly enabled.
+     */
+    private boolean supportsJsonMode = false;
+
+    /**
+     * Maximum number of context tokens the model can handle.
+     * Default is 0, indicating unknown or not applicable.
+     */
+    private int maxContextTokens = 0;
+
+    /**
+     * Maximum number of output tokens the model can generate.
+     * Default is 0, indicating unknown or not applicable.
+     */
+    private int maxOutputTokens = 0;    /**
+     * A brief description of the model.
+     * Default is null.
+     */
+    private String description;
+      /**
      * Additional configuration notes, limitations, or special requirements for the model.
      * This field provides flexible metadata storage for model-specific information such as
      * maximum file sizes, token limits, rate limiting details, or usage restrictions.
@@ -97,6 +126,11 @@ public class LlmConfiguration {
      *   <li>Text support: {@code true} (enabled by default)</li>
      *   <li>Image support: {@code false} (disabled by default)</li>
      *   <li>PDF support: {@code false} (disabled by default)</li>
+     *   <li>Function Calling support: {@code false} (disabled by default)</li>
+     *   <li>JSON Mode support: {@code false} (disabled by default)</li>
+     *   <li>Token limits: {@code 0}</li>
+     *   <li>Pricing Tier: {@code null}</li>
+     *   <li>Description: {@code null}</li>
      *   <li>All other fields: {@code null}</li>
      * </ul>
      */
@@ -111,6 +145,10 @@ public class LlmConfiguration {
      * @param supportsText whether the model supports text input processing
      * @param supportsImage whether the model supports image input and vision capabilities
      * @param supportsPdf whether the model supports PDF document processing
+     * @param supportsFunctionCalling whether the model supports function calling
+     * @param supportsJsonMode whether the model supports JSON output mode     * @param maxContextTokens maximum context tokens
+     * @param maxOutputTokens maximum output tokens
+     * @param description a brief description of the model
      * @param notes additional configuration notes, limitations, or requirements
      * 
      * <p><strong>Usage Example:</strong></p>
@@ -121,16 +159,25 @@ public class LlmConfiguration {
      *     true,  // supports text
      *     true,  // supports images
      *     false, // no PDF support
+     *     true,  // supports function calling
+     *     true,  // supports JSON mode     *     128000, // max context tokens
+     *     4096,  // max output tokens
+     *     "Latest GPT-4 model with vision capabilities.", // description
      *     "Max image size: 20MB"
      * );
      * </pre>
-     */
-    public LlmConfiguration(String id, String name, boolean supportsText, boolean supportsImage, boolean supportsPdf, String notes) {
+     */    public LlmConfiguration(String id, String name, boolean supportsText, boolean supportsImage, boolean supportsPdf, 
+                            boolean supportsFunctionCalling, boolean supportsJsonMode, 
+                            int maxContextTokens, int maxOutputTokens, String description, String notes) {
         this.id = id;
         this.name = name;
         this.supportsText = supportsText;
         this.supportsImage = supportsImage;
         this.supportsPdf = supportsPdf;
+        this.supportsFunctionCalling = supportsFunctionCalling;
+        this.supportsJsonMode = supportsJsonMode;        this.maxContextTokens = maxContextTokens;
+        this.maxOutputTokens = maxOutputTokens;
+        this.description = description;
         this.notes = notes;
     }
       /**
@@ -140,12 +187,14 @@ public class LlmConfiguration {
      * @return a new LlmConfigurationBuilder instance with default settings
      * 
      * <p><strong>Usage Example:</strong></p>
-     * <pre>
-     * LlmConfiguration config = LlmConfiguration.builder()
+     * <pre>     * LlmConfiguration config = LlmConfiguration.builder()
      *     .id("claude-3-opus")
      *     .name("Claude 3 Opus")
      *     .supportsText(true)
      *     .supportsImage(true)
+     *     .supportsFunctionCalling(true)
+     *     .maxContextTokens(200000)
+     *     .description("Anthropic's most powerful model.")
      *     .notes("Premium model with advanced reasoning")
      *     .build();
      * </pre>
@@ -173,7 +222,7 @@ public class LlmConfiguration {
      */
     @JsonProperty("capabilities")
     public Capabilities getCapabilities() {
-        return new Capabilities(supportsText, supportsImage, supportsPdf);
+        return new Capabilities(supportsText, supportsImage, supportsPdf, supportsFunctionCalling, supportsJsonMode);
     }
       /**
      * Returns the unique identifier for this LLM configuration.
@@ -262,6 +311,45 @@ public class LlmConfiguration {
     public void setSupportsPdf(boolean supportsPdf) {
         this.supportsPdf = supportsPdf;
     }
+
+    public boolean isSupportsFunctionCalling() {
+        return supportsFunctionCalling;
+    }
+
+    public void setSupportsFunctionCalling(boolean supportsFunctionCalling) {
+        this.supportsFunctionCalling = supportsFunctionCalling;
+    }
+
+    public boolean isSupportsJsonMode() {
+        return supportsJsonMode;
+    }
+
+    public void setSupportsJsonMode(boolean supportsJsonMode) {
+        this.supportsJsonMode = supportsJsonMode;
+    }
+
+    public int getMaxContextTokens() {
+        return maxContextTokens;
+    }
+
+    public void setMaxContextTokens(int maxContextTokens) {
+        this.maxContextTokens = maxContextTokens;
+    }
+
+    public int getMaxOutputTokens() {
+        return maxOutputTokens;
+    }
+
+    public void setMaxOutputTokens(int maxOutputTokens) {        this.maxOutputTokens = maxOutputTokens;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
     
     /**
      * Returns additional configuration notes or limitations for this model.
@@ -305,6 +393,16 @@ public class LlmConfiguration {
          * Indicates PDF processing capability - immutable after construction.
          */
         private final boolean pdf;
+
+        /**
+         * Indicates function calling capability - immutable after construction.
+         */
+        private final boolean functionCalling;
+
+        /**
+         * Indicates JSON mode capability - immutable after construction.
+         */
+        private final boolean jsonMode;
         
         /**
          * Constructs a new Capabilities instance with the specified capability flags.
@@ -313,11 +411,15 @@ public class LlmConfiguration {
          * @param text whether text processing is supported
          * @param image whether image processing is supported
          * @param pdf whether PDF processing is supported
+         * @param functionCalling whether function calling is supported
+         * @param jsonMode whether JSON mode is supported
          */
-        public Capabilities(boolean text, boolean image, boolean pdf) {
+        public Capabilities(boolean text, boolean image, boolean pdf, boolean functionCalling, boolean jsonMode) {
             this.text = text;
             this.image = image;
             this.pdf = pdf;
+            this.functionCalling = functionCalling;
+            this.jsonMode = jsonMode;
         }
         
         /**
@@ -346,6 +448,14 @@ public class LlmConfiguration {
         public boolean isPdf() {
             return pdf;
         }
+
+        public boolean isFunctionCalling() {
+            return functionCalling;
+        }
+
+        public boolean isJsonMode() {
+            return jsonMode;
+        }
     }
       /**
      * Builder class implementing the Builder pattern for constructing LlmConfiguration instances.
@@ -357,6 +467,11 @@ public class LlmConfiguration {
      *   <li>Text support: {@code true} (enabled by default)</li>
      *   <li>Image support: {@code false} (disabled by default)</li>
      *   <li>PDF support: {@code false} (disabled by default)</li>
+     *   <li>Function Calling support: {@code false} (disabled by default)</li>
+     *   <li>JSON Mode support: {@code false} (disabled by default)</li>
+     *   <li>Token limits: {@code 0}</li>
+     *   <li>Pricing Tier: {@code null}</li>
+     *   <li>Description: {@code null}</li>
      *   <li>ID and name: {@code null} (must be explicitly set)</li>
      *   <li>Notes: {@code null} (optional)</li>
      * </ul>
@@ -379,6 +494,10 @@ public class LlmConfiguration {
         private boolean supportsText = true;
         private boolean supportsImage = false;
         private boolean supportsPdf = false;
+        private boolean supportsFunctionCalling = false;
+        private boolean supportsJsonMode = false;        private int maxContextTokens = 0;
+        private int maxOutputTokens = 0;
+        private String description;
         private String notes;
         
         /**
@@ -441,6 +560,30 @@ public class LlmConfiguration {
             this.supportsPdf = supportsPdf;
             return this;
         }
+
+        public LlmConfigurationBuilder supportsFunctionCalling(boolean supportsFunctionCalling) {
+            this.supportsFunctionCalling = supportsFunctionCalling;
+            return this;
+        }
+
+        public LlmConfigurationBuilder supportsJsonMode(boolean supportsJsonMode) {
+            this.supportsJsonMode = supportsJsonMode;
+            return this;
+        }
+
+        public LlmConfigurationBuilder maxContextTokens(int maxContextTokens) {
+            this.maxContextTokens = maxContextTokens;
+            return this;
+        }
+
+        public LlmConfigurationBuilder maxOutputTokens(int maxOutputTokens) {
+            this.maxOutputTokens = maxOutputTokens;
+            return this;        }
+
+        public LlmConfigurationBuilder description(String description) {
+            this.description = description;
+            return this;
+        }
         
         /**
          * Sets additional configuration notes or limitations for the model.
@@ -459,9 +602,10 @@ public class LlmConfiguration {
          * the values set through the builder methods.
          * 
          * @return a new LlmConfiguration instance with the configured values
-         */
-        public LlmConfiguration build() {
-            return new LlmConfiguration(id, name, supportsText, supportsImage, supportsPdf, notes);
+         */        public LlmConfiguration build() {
+            return new LlmConfiguration(id, name, supportsText, supportsImage, supportsPdf, 
+                                        supportsFunctionCalling, supportsJsonMode, 
+                                        maxContextTokens, maxOutputTokens, description, notes);
         }
     }
 }

@@ -7,6 +7,8 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -30,6 +32,9 @@ public class MultimodalContentServiceTest {
     @BeforeEach
     public void setup() {
         MockitoAnnotations.openMocks(this);
+          // Set the @Value field values using ReflectionTestUtils
+        ReflectionTestUtils.setField(multimodalContentService, "maxImageSize", DataSize.ofMegabytes(5));
+        ReflectionTestUtils.setField(multimodalContentService, "maxPdfSize", DataSize.ofMegabytes(10));
         
         // Set up test models
         textOnlyModel = LlmConfiguration.builder()

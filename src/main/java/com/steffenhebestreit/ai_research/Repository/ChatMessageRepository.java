@@ -53,8 +53,7 @@ import java.util.List;
 @Repository
 public interface ChatMessageRepository extends JpaRepository<ChatMessage, String> {
     
-    /**
-     * Retrieves all messages for a specific chat ordered chronologically by timestamp.
+    /**     * Retrieves all messages for a specific chat ordered chronologically by creation time.
      * 
      * <p>Finds all ChatMessage entities associated with the specified chat ID and
      * returns them in ascending order by creation timestamp. This method provides
@@ -64,14 +63,14 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessage, String
      * <h3>Query Behavior:</h3>
      * <ul>
      * <li>Filters messages by exact chat ID match</li>
-     * <li>Orders results by timestamp in ascending order (oldest first)</li>
+     * <li>Orders results by createdAt in ascending order (oldest first)</li>
      * <li>Returns empty list if no messages exist for the chat</li>
      * <li>Includes all message types (user, assistant, system)</li>
      * </ul>
      * 
      * <h3>Performance:</h3>
      * <ul>
-     * <li>Leverages database indexes on chat_id and timestamp</li>
+     * <li>Leverages database indexes on chat_id and createdAt</li>
      * <li>Single query execution for complete conversation retrieval</li>
      * <li>Optimized for chat display and conversation reconstruction</li>
      * </ul>
@@ -85,9 +84,9 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessage, String
      * </ul>
      * 
      * @param chatId The unique identifier of the chat to retrieve messages for
-     * @return List of ChatMessage entities ordered by timestamp (ascending)
-     * @see ChatMessage#getTimestamp()
+     * @return List of ChatMessage entities ordered by createdAt (ascending)
+     * @see ChatMessage#getCreatedAt()
      * @see Chat#getId()
      */
-    List<ChatMessage> findByChatIdOrderByTimestampAsc(String chatId);
+    List<ChatMessage> findByChatIdOrderByCreatedAtAsc(String chatId);
 }

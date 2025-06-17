@@ -1,5 +1,6 @@
 package com.steffenhebestreit.ai_research.Controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.steffenhebestreit.ai_research.Model.Chat;
 import com.steffenhebestreit.ai_research.Model.LlmConfiguration;
 import com.steffenhebestreit.ai_research.Model.Message;
@@ -34,13 +35,14 @@ public class MultimodalControllerTest {
     private OpenAIService openAIService;
 
     @Mock
-    private ChatService chatService;
-
-    @Mock
+    private ChatService chatService;    @Mock
     private MultimodalContentService multimodalContentService;
 
     @Mock
     private LlmCapabilityService llmCapabilityService;
+    
+    @Mock
+    private ObjectMapper objectMapper;
 
     @InjectMocks
     private MultimodalController multimodalController;
@@ -60,9 +62,7 @@ public class MultimodalControllerTest {
             .build();
             
         when(llmCapabilityService.getLlmConfiguration("gpt-4-vision")).thenReturn(visionModel);
-    }
-
-    @Test
+    }    @Test
     void chatMultimodal_WithValidImageAndPrompt_ShouldReturnSuccess() throws Exception {
         // Given
         String prompt = "What's in this image?";
@@ -87,14 +87,21 @@ public class MultimodalControllerTest {
         // Setup response from OpenAI
         String aiResponse = "I can see a cat in the image.";
         when(openAIService.getMultimodalCompletion(any(), eq("gpt-4-vision"))).thenReturn(aiResponse);
-          // Setup chat creation
+        
+        // Setup ObjectMapper mock
+        when(objectMapper.writeValueAsString(any())).thenReturn("{\"multimodal\":\"content\"}");
+          
+        // Setup chat creation
         Chat newChat = new Chat();
         newChat.setId("chat123");
         when(chatService.createChat(any(Message.class))).thenReturn(newChat);
         
-        // When
-        ResponseEntity<?> response = multimodalController.chatMultimodal(prompt, file, "gpt-4-vision");
-          // Then
+        // Mock the getRecentChats method to return an empty list (no duplicates)
+        when(chatService.getRecentChats(anyInt())).thenReturn(new ArrayList<>());
+          // When
+        ResponseEntity<?> response = multimodalController.chatMultimodal(prompt, file, "gpt-4-vision", null);
+          
+        // Then
         assertEquals(HttpStatus.OK, response.getStatusCode());
         assertNotNull(response.getBody());
         assertEquals(aiResponse, response.getBody());
@@ -122,19 +129,19 @@ public class MultimodalControllerTest {
         when(multimodalContentService.validateFile(file, "gpt-3.5-turbo")).thenReturn(validationResult);
         
         // When
-        ResponseEntity<?> response = multimodalController.chatMultimodal(prompt, file, "gpt-3.5-turbo");
-          // Then
+        ResponseEntity<?> response = multimodalController.chatMultimodal(prompt, file, "gpt-3.5-turbo", null);
+        
+        // Then
         assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
-        assertNotNull(response.getBody());
-        assertTrue(response.getBody().toString().contains("Model does not support images"));
+        Object responseBody = response.getBody();
+        assertNotNull(responseBody);
+        assertTrue(responseBody.toString().contains("Model does not support images"));
         
         // Verify the interactions
         verify(multimodalContentService).validateFile(file, "gpt-3.5-turbo");
         verify(multimodalContentService, never()).fileToDataUri(any());
         verify(openAIService, never()).getMultimodalCompletion(any(), any());
-    }
-
-    @Test
+    }    @Test
     void chatStreamMultimodal_WithValidImageAndPrompt_ShouldReturnFlux() throws Exception {
         // Given
         String prompt = "Describe this image in detail";
@@ -156,13 +163,20 @@ public class MultimodalControllerTest {
         List<String> streamResponses = List.of("I", " can", " see", " a", " cat", " in", " the", " image.");
         when(openAIService.getMultimodalCompletionStream(any(), eq("gpt-4-vision")))
             .thenReturn(Flux.fromIterable(streamResponses));
-          // Setup chat creation
+        
+        // Setup ObjectMapper mock
+        when(objectMapper.writeValueAsString(any())).thenReturn("{\"multimodal\":\"content\"}");
+        
+        // Mock the getRecentChats method to return an empty list (no duplicates)
+        when(chatService.getRecentChats(anyInt())).thenReturn(new ArrayList<>());
+          
+        // Setup chat creation
         Chat newChat = new Chat();
         newChat.setId("chat456");
         when(chatService.createChat(any(Message.class))).thenReturn(newChat);
         
         // When
-        Flux<String> resultFlux = multimodalController.chatStreamMultimodal(prompt, file, "gpt-4-vision");
+        Flux<String> resultFlux = multimodalController.chatStreamMultimodal(prompt, file, "gpt-4-vision", null);
         
         // Then
         // Since we can't use StepVerifier in this test environment, we'll verify method calls

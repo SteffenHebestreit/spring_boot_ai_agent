@@ -1,31 +1,38 @@
 package com.steffenhebestreit.ai_research.Service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.steffenhebestreit.ai_research.Configuration.OpenAIProperties;
+import com.steffenhebestreit.ai_research.Model.ChatMessage;
 import com.steffenhebestreit.ai_research.Model.LlmConfiguration;
+import com.steffenhebestreit.ai_research.Model.LlmConfigurationAdapter;
+import com.steffenhebestreit.ai_research.Model.ProviderModel;
+import com.steffenhebestreit.ai_research.Model.ProviderModelAdapter;
+import com.steffenhebestreit.ai_research.Model.ToolSelectionRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
+import reactor.core.publisher.Mono;
 
 import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * Service for interacting with OpenAI-compatible LLM APIs, including multimodal content processing.
@@ -41,6 +48,7 @@ import java.util.Map;
  *   <li><b>Multimodal processing</b> - Handle images and PDFs with vision-enabled models</li>
  *   <li><b>Message summarization</b> - Automatic content summarization for context management</li>
  *   <li><b>Conversation history</b> - Support for multi-turn conversations with context</li>
+ *   <li><b>Model Capability Detection</b> - Dynamically determines model features</li>
  * </ul>
  * <p>
  * The service automatically handles:
@@ -56,9 +64,15 @@ import java.util.Map;
  * The service includes specialized methods for processing content that combines text with images
  * or PDF documents. This requires vision-enabled LLM models (e.g., GPT-4V, GPT-4o) and properly
  * formatted content with base64-encoded file data.
+ * <p>
+ * <b>Model Capability Detection:</b>
+ * The service fetches available models from the configured endpoint and attempts to determine
+ * their capabilities. It first checks for an `LlmConfiguration` provided by `LlmCapabilityService`.
+ * If found, those settings are used. Otherwise, a basic fallback is applied, enabling text generation
+ * and tool use by default, with conservative token limits.
  * 
  * @author Steffen Hebestreit
- * @version 1.0
+ * @version 1.1
  * @since 1.0
  * @see LlmCapabilityService
  * @see MultimodalContentService
@@ -69,7 +83,7 @@ public class OpenAIService {
     private static final Logger logger = LoggerFactory.getLogger(OpenAIService.class);
     private final OpenAIProperties openAIProperties;
     private final WebClient webClient;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper; // Retained initialization in constructor
     private final DynamicIntegrationService dynamicIntegrationService;
     private final LlmCapabilityService llmCapabilityService;
 
@@ -79,16 +93,15 @@ public class OpenAIService {
         this.openAIProperties = openAIProperties;
         this.dynamicIntegrationService = dynamicIntegrationService;
         this.llmCapabilityService = llmCapabilityService;
-        // Ensure the base URL does not end with a slash if the request URIs start with a slash
         String baseUrl = openAIProperties.getBaseurl();
         if (baseUrl == null) {
-            baseUrl = "http://localhost:1234"; // Default fallback if null
+            baseUrl = "http://localhost:1234"; 
             logger.warn("Base URL is null, using default fallback: {}", baseUrl);
         } else if (baseUrl.endsWith("/")) {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
         this.webClient = webClientBuilder.baseUrl(baseUrl).build();
-        this.objectMapper = objectMapper;
+        this.objectMapper = objectMapper; // Ensure it's assigned
     }
 
     @PostConstruct
@@ -100,203 +113,272 @@ public class OpenAIService {
         logger.debug("Model: {}", openAIProperties.getModel());
         logger.debug("=====================================");
     }
-
-    private List<Map<String, Object>> prepareMessagesForLlm(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
-        List<Map<String, Object>> messagesForLlm = new ArrayList<>();
-
-        // Prepend the system role message
-        String systemRole = openAIProperties.getSystemRole();
-        logger.info("DEBUG: Current systemRole value: '{}'", systemRole);
-        logger.info("DEBUG: systemRole null check: {}, empty check: {}", 
-            systemRole == null, systemRole != null ? systemRole.isEmpty() : "null");
+    
+    // Helper class for assembling tool calls from stream chunks
+    static class StreamingToolCall {
+        String id;
+        String type = "function"; // Default type
+        StringBuilder functionName = new StringBuilder();
+        StringBuilder functionArguments = new StringBuilder();
+        Integer index; // OpenAI ToolCall in stream has an index
         
-        if (systemRole != null && !systemRole.isEmpty()) {
-            Map<String, Object> systemMessageMap = new HashMap<>();
-            systemMessageMap.put("role", "system");
-            // Append current time to the system role
-            String timeAppendedSystemRole = systemRole + " Current time: " + java.time.Instant.now().toString() + ".";
-            systemMessageMap.put("content", timeAppendedSystemRole);
-            messagesForLlm.add(systemMessageMap);
-            logger.debug("Prepended system message to LLM request: {}", 
-                timeAppendedSystemRole.substring(0, Math.min(100, timeAppendedSystemRole.length())) + "...");
-        } else {
-            logger.warn("WARNING: System role is null or empty! No system message will be sent to LLM!");
+        public StreamingToolCall(Integer index) {
+            this.index = index;
         }
-
-        if (conversationMessages != null) {
-            for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : conversationMessages) {
-                Map<String, Object> llmMessage = new HashMap<>();
-                String role = msg.getRole();
-                if ("agent".equalsIgnoreCase(role)) {
-                    role = "assistant"; // Map internal 'agent' role to 'assistant' for LLM
-                }
-                llmMessage.put("role", role);
-                llmMessage.put("content", msg.getContent());
-                messagesForLlm.add(llmMessage);
+        
+        public void setId(String id) {
+            if (this.id == null && id != null) { 
+                this.id = id;
             }
         }
-        return messagesForLlm;
+        
+        public void setType(String type) {
+            if (type != null) {
+                this.type = type;
+            }
+        }
+        
+        public void appendName(String namePart) {
+            if (namePart != null) {
+                this.functionName.append(namePart);
+            }
+        }
+        
+        public void appendArguments(String argsPart) {
+            if (argsPart != null) {
+                this.functionArguments.append(argsPart);
+            }
+        }
+          public boolean isComplete() {
+            // ID and function name are essential. Arguments can be an empty string.
+            return id != null && !id.isEmpty() && functionName.length() > 0;
+        }
+
+        public Map<String, Object> build() {
+            if (!isComplete()) {
+                OpenAIService.logger.warn("Attempting to build incomplete tool call. Index: {}, ID: {}, Name: '{}', Args (preview): '{}'", 
+                                           index, id, functionName.toString(), functionArguments.toString().substring(0, Math.min(50, functionArguments.length())));
+                // Depending on requirements, might throw an exception or return null for critical incompleteness.
+                // For now, proceeds to build with available data, consistent with previous logging behavior.
+            }
+            Map<String, Object> toolCallMap = new HashMap<>();
+            toolCallMap.put("id", this.id);
+            toolCallMap.put("type", this.type); // Typically "function"
+
+            Map<String, String> functionDetailsMap = new HashMap<>();
+            functionDetailsMap.put("name", functionName.toString());
+            functionDetailsMap.put("arguments", functionArguments.toString());
+
+            toolCallMap.put("function", functionDetailsMap);
+            return toolCallMap;
+        }
+    }    // Helper methods for sink management
+    private void tryCloseSinkWithCompletion(FluxSink<String> sink, AtomicBoolean sinkClosedFlag, String modelId, String reason, AtomicBoolean cancellationFlag) {
+        if (cancellationFlag.get()) {
+            if (sinkClosedFlag.compareAndSet(false, true)) {
+                logger.info("Sink completion for modelId: {} ({}) aborted due to cancellation.", modelId, reason);
+                try {
+                    sink.error(new CancellationException("Stream cancelled before explicit completion: " + reason));
+                } catch (UnsupportedOperationException ex) {
+                    logger.warn("UnsupportedOperationException when trying to signal error on cancellation for modelId: {}. Sink may already be completed.", modelId);
+                }
+            }
+            return;
+        }
+        if (sinkClosedFlag.compareAndSet(false, true)) {
+            logger.info("Completing sink for modelId: {} due to: {}", modelId, reason);
+            try {
+                sink.complete();
+            } catch (UnsupportedOperationException ex) {
+                logger.warn("UnsupportedOperationException when trying to complete sink for modelId: {}. Sink may already be in terminal state.", modelId);
+            }
+        } else {
+            logger.warn("Sink already closed for modelId: {}, completion attempt for reason '{}' ignored.", modelId, reason);
+        }
     }
 
-    public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
+    private void tryCloseSinkWithError(FluxSink<String> sink, AtomicBoolean sinkClosedFlag, Throwable error, String modelId, AtomicBoolean cancellationFlag) {
+        if (error instanceof CancellationException) {
+            if (sinkClosedFlag.compareAndSet(false, true)) {
+                logger.info("Sink closing for modelId: {} due to explicit CancellationException: {}", modelId, error.getMessage());
+                try {
+                    sink.error(error);
+                } catch (UnsupportedOperationException ex) {
+                    logger.warn("UnsupportedOperationException when trying to signal cancellation error for modelId: {}. Sink may already be in terminal state.", modelId);
+                }
+            } else {
+                logger.info("Sink already closed for modelId: {}. CancellationException ({}) noted.", modelId, error.getMessage());
+            }
+            return;
+        }
+        if (cancellationFlag.get()) {
+            if (sinkClosedFlag.compareAndSet(false, true)) {
+                logger.info("Sink closing for modelId: {} due to error ({}) occurring during active cancellation.", modelId, error.getClass().getSimpleName());
+                try {
+                    sink.error(new CancellationException("Stream cancelled, original error: " + error.getMessage()));
+                } catch (UnsupportedOperationException ex) {
+                    logger.warn("UnsupportedOperationException when trying to signal error during cancellation for modelId: {}. Sink may already be in terminal state.", modelId);
+                }
+            } else {
+                 logger.info("Sink already closed for modelId: {}. Error ({}) occurred during active cancellation, but sink was already handled.", modelId, error.getClass().getSimpleName());
+            }
+            return;
+        }
+
+        if (sinkClosedFlag.compareAndSet(false, true)) {
+            logger.error("Erroring sink for modelId: {}", modelId, error);
+            try {
+                sink.error(error);
+            } catch (UnsupportedOperationException ex) {
+                logger.warn("UnsupportedOperationException when trying to signal error for modelId: {}. Sink may already be in terminal state.", modelId);
+            }
+        } else {
+            logger.warn("Sink already closed for modelId: {}, error attempt ignored. Original error for modelId {}:", modelId, modelId, error);        }
+    }
+      // Prepares messages for LLM by converting ChatMessage objects to the format expected by OpenAI API
+    private List<Map<String, Object>> prepareMessagesForLlm(List<ChatMessage> messages) {
+        // The last message is typically the current/new message that should keep full multimodal content
+        // All previous messages are history and should use token-efficient content
+        final int lastMessageIndex = messages.size() - 1;
+        
+        return messages.stream()
+                .map(messages::indexOf) // Get index of each message
+                .map(index -> {
+                    ChatMessage msg = messages.get(index);
+                    boolean isCurrentMessage = (index == lastMessageIndex);
+                    
+                    Map<String, Object> llmMessage = new HashMap<>();
+                    String role = msg.getRole();
+                    
+                    // Map "agent" role to "assistant" for compatibility with LLM API
+                    if ("agent".equals(role)) {
+                        role = "assistant";
+                        logger.debug("Mapped 'agent' role to 'assistant' for LLM API compatibility");
+                    }
+                    
+                    llmMessage.put("role", role);                    // Content is nullable, especially for assistant messages with tool_calls
+                    if (msg.getContent() != null) {                        // Handle multimodal content specifically
+                        if ("multipart/mixed".equals(msg.getContentType())) {
+                            try {
+                                // Try to parse the content as JSON for multimodal content
+                                Object parsedContent = objectMapper.readValue(msg.getContent(), Object.class);
+                                
+                                // Check if this looks like a history message with stripped content
+                                if (isHistoryFriendlyContent(parsedContent)) {
+                                    // This is already a history message with stripped images - keep as-is
+                                    llmMessage.put("content", parsedContent);
+                                    logger.debug("Using pre-existing history-friendly multimodal content for role: {}", role);
+                                } else {
+                                    // This is a message with full multimodal content
+                                    if (isCurrentMessage) {
+                                        // Current/new message - keep full multimodal content with images
+                                        llmMessage.put("content", parsedContent);
+                                        logger.debug("Using full multimodal content for current message with role: {}", role);
+                                    } else {
+                                        // Historical message - convert to history-friendly for token efficiency
+                                        Object historyFriendlyContent = createHistoryFriendlyMultimodalContent(parsedContent);
+                                        llmMessage.put("content", historyFriendlyContent);
+                                        logger.debug("Converted full multimodal content to history-friendly format for historical message with role: {}", role);
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // If parsing fails, check if this might be a simple text string from history
+                                String content = msg.getContent();
+                                if (content.contains("[Image content omitted") || content.contains("[Multimodal content")) {
+                                    // This looks like a stripped text representation
+                                    llmMessage.put("content", content);
+                                    logger.debug("Using text representation of multimodal content for history message");
+                                } else {
+                                    // If parsing fails, fall back to using the string directly
+                                    logger.warn("Failed to parse multimodal content JSON, using raw string: {}", e.getMessage());
+                                    llmMessage.put("content", content);
+                                }
+                            }
+                        } else {
+                            // Regular text content
+                            llmMessage.put("content", msg.getContent());
+                        }
+                    } else {
+                        // If content is null, explicitly put null, unless it's an assistant message
+                        // that will have tool_calls, in which case content might be omitted by OpenAI spec.
+                        // For now, always include it if null, unless tool_calls are present.                        llmMessage.put("content", null);
+                    }
+                    
+                    if ("assistant".equals(role)) {
+                        // Handle tool calls for assistant messages
+                        if (msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
+                            llmMessage.put("tool_calls", msg.getToolCalls());
+                            // OpenAI API: "content is required if tool_calls is not specified".
+                            // "If tool_calls is specified, content is optional."
+                            // Remove content key if null when tool_calls are present
+                            if (msg.getContent() == null) {
+                                llmMessage.remove("content");
+                            }
+                        }
+                        // The 'name' field from ChatMessage is not used for 'assistant' role messages.
+                    } else if ("tool".equals(role)) {
+                        llmMessage.put("tool_call_id", msg.getToolCallId());
+                        // The 'name' field in ChatMessage for 'tool' role corresponds to the function name.
+                        llmMessage.put("name", msg.getName());
+                        // Content for a 'tool' message is the result of the tool execution (JSON string).
+                        // It's already handled by msg.getContent() above.
+                    } else if ("user".equals(role)) {
+                        // For user messages, 'name' can optionally be used to specify the user's name.
+                        if (msg.getName() != null && !msg.getName().isEmpty()) {
+                            llmMessage.put("name", msg.getName());
+                        }
+                    }
+                    // 'system' role messages typically only have 'role' and 'content'.
+
+                    return llmMessage;
+                })
+                .collect(Collectors.toList());
+    }
+
+    public Flux<String> getChatCompletionStream(List<ChatMessage> conversationMessages) {
         return getChatCompletionStream(conversationMessages, openAIProperties.getModel());
     }
     
-    public Flux<String> getChatCompletionStream(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
-        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(conversationMessages);
+    public Flux<String> getChatCompletionStream(List<ChatMessage> conversationMessages, String modelId) {
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(conversationMessages); // Uses updated method
 
-        if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && conversationMessages.isEmpty())) {
-            logger.warn("Conversation messages list is effectively empty (only system message or completely empty). Cannot make request to LLM.");
+        if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && (conversationMessages == null || conversationMessages.isEmpty()))) {
+            logger.warn("Conversation messages list is effectively empty. Cannot make request to LLM.");
             return Flux.error(new IllegalArgumentException("Cannot send an effectively empty message list to LLM."));
-        }
-
-        Map<String, Object> requestBody = new HashMap<>();
+        }        Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", modelId);
-        requestBody.put("messages", messagesForLlm); // Use the full conversation history
+        requestBody.put("messages", messagesForLlm); 
         requestBody.put("stream", true);
         
-        // Add discovered MCP tools to request
-        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
-        if (mcpTools != null && !mcpTools.isEmpty()) {
-            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
-            logger.info("Adding {} MCP tools to LLM request", formattedTools.size());
-            requestBody.put("tools", formattedTools);
-            
-            // Log first few tools for debugging if available
-            if (logger.isDebugEnabled() && formattedTools.size() > 0) {
-                int toolsToLog = Math.min(2, formattedTools.size());
-                for (int i = 0; i < toolsToLog; i++) {
-                    Map<String, Object> tool = formattedTools.get(i);
-                    Object type = tool.get("type");
-                    Object name = "unknown";
-                    
-                    // Safely extract function name if available
-                    if (tool.get("function") instanceof Map) {
-                        @SuppressWarnings("unchecked")
-                        Map<String, Object> functionMap = (Map<String, Object>) tool.get("function");
-                        name = functionMap.getOrDefault("name", "unnamed");
-                    }
-                    
-                    logger.debug("Tool #{}: Type: {}, Name: {}", i+1, type, name);
-                }
+        // Check if we have multimodal content in the conversation
+        boolean hasMultimodalContent = conversationMessages.stream()
+            .anyMatch(msg -> "multipart/mixed".equals(msg.getContentType()));
+        
+        // Add discovered MCP tools to request when available, but exclude for multimodal content
+        if (!hasMultimodalContent) {
+            List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+            if (mcpTools != null && !mcpTools.isEmpty()) {
+                requestBody.put("tools", convertMcpToolsToOpenAIFormat(mcpTools));
+                logger.debug("Added {} tools to basic streaming request for modelId: {}", mcpTools.size(), modelId);
             }
         } else {
-            logger.debug("No MCP tools available to add to LLM request");
+            logger.info("Multimodal content detected in basic stream. Excluding tools to let LLM focus on native vision capabilities for modelId: {}", modelId);
         }
 
         String path = "/chat/completions";
-
-        logger.info("Sending streaming request to LLM: {} with model: {} and {} messages.", openAIProperties.getBaseurl() + path, modelId, messagesForLlm.size());
-        if (messagesForLlm.size() <= 2) { // Log first few messages for debugging if history is short
-            messagesForLlm.forEach(m -> logger.debug("Message to LLM: Role: {}, Content: {}", m.get("role"), ((String)m.get("content")).substring(0, Math.min(100, ((String)m.get("content")).length()))));
-        }
-
-
-        return webClient.post()
+        logger.info("Sending basic streaming request to LLM: {} with model: {} and {} messages.", openAIProperties.getBaseurl() + path, modelId, messagesForLlm.size());        return webClient.post()
                 .uri(path)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(requestBody)
                 .retrieve()
                 .bodyToFlux(String.class)
-                .doOnNext(rawEvent -> logger.info("Raw event from LLM: {}", rawEvent))
-                .map(String::trim)
-                .filter(trimmedEvent -> !"[DONE]".equalsIgnoreCase(trimmedEvent))
-                .map(jsonChunk -> {
-                    try {
-                        // Handle the [DONE] marker
-                        if ("[DONE]".equalsIgnoreCase(jsonChunk.trim())) {
-                            return "";
-                        }
-                        
-                        JsonNode rootNode = objectMapper.readTree(jsonChunk);
-                        JsonNode choicesNode = rootNode.path("choices");
-                        if (choicesNode.isArray() && !choicesNode.isEmpty()) {
-                            JsonNode firstChoice = choicesNode.get(0);
-                            JsonNode deltaNode = firstChoice.path("delta");
-                            JsonNode contentNode = deltaNode.path("content");
-                            if (contentNode.isTextual()) {
-                                // Just return the raw content
-                                return contentNode.asText();
-                            }
-                        }
-                    } catch (JsonProcessingException e) {
-                        logger.error("Error parsing JSON chunk from LLM stream: '{}'", jsonChunk, e);
-                    }
-                    return "";
-                })
+                .map(this::extractContentFromStreamResponse)
                 .filter(content -> content != null && !content.isEmpty())
-                .doOnError(error -> {
-                    logger.error("Error during LLM stream processing or request. Error Type: {}", error.getClass().getName());
-                    // Log the full stack trace for the error
-                    logger.error("Full Error Details: ", error); 
-                    if (error instanceof org.springframework.web.reactive.function.client.WebClientResponseException) {
-                        org.springframework.web.reactive.function.client.WebClientResponseException wcre = (org.springframework.web.reactive.function.client.WebClientResponseException) error;
-                        logger.error("LLM API Error: Status Code: {}, Headers: {}, Response Body: '{}'",
-                                wcre.getStatusCode(), wcre.getHeaders(), wcre.getResponseBodyAsString());
-                    }
-                })
-                .doOnComplete(() -> logger.info("LLM stream completed."));
+                .doOnError(error -> logger.error("Error during basic LLM stream processing for modelId: {}", modelId, error))
+                .doOnComplete(() -> logger.info("Basic LLM stream completed for modelId: {}", modelId));
     }
-
-    @SuppressWarnings("unchecked")
-    public String getChatCompletion(String userMessage) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(openAIProperties.getKey());
-
-        // Create a dummy ChatMessage list to reuse prepareMessagesForLlm
-        com.steffenhebestreit.ai_research.Model.ChatMessage userChatMessage = new com.steffenhebestreit.ai_research.Model.ChatMessage();
-        userChatMessage.setRole("user");
-        userChatMessage.setContent(userMessage);
-        List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages = Collections.singletonList(userChatMessage);
-        
-        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(conversationMessages);
-
-        Map<String, Object> requestBodyMap = new HashMap<>();
-        requestBodyMap.put("model", openAIProperties.getModel());
-        requestBodyMap.put("messages", messagesForLlm); // Use the prepared messages
-        requestBodyMap.put("max_tokens", 150);
-        
-        // Add discovered MCP tools to request
-        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
-        if (mcpTools != null && !mcpTools.isEmpty()) {
-            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
-            logger.info("Adding {} MCP tools to non-streaming LLM request", formattedTools.size());
-            requestBodyMap.put("tools", formattedTools);
-        }
-
-        org.springframework.http.HttpEntity<Map<String, Object>> entity = new org.springframework.http.HttpEntity<>(requestBodyMap, headers);
-        String fullUrl = openAIProperties.getBaseurl() + "/chat/completions";
-        RestTemplate restTemplate = new RestTemplate();
-
-        try {
-            logger.info("Sending non-streaming request to LLM: {} with model: {}", fullUrl, openAIProperties.getModel());
-            ResponseEntity<Map<String, Object>> response = restTemplate.postForEntity(fullUrl, entity, (Class<Map<String,Object>>)(Class<?>)Map.class);
-
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                Map<String, Object> responseBody = response.getBody();
-                if (responseBody != null) {
-                    List<Map<String, Object>> choices = (List<Map<String, Object>>) responseBody.get("choices");
-                    if (choices != null && !choices.isEmpty()) {
-                        Map<String, Object> firstChoice = choices.get(0);
-                        Map<String, String> messageContent = (Map<String, String>) firstChoice.get("message");
-                        if (messageContent != null) {
-                            return messageContent.get("content");
-                        }
-                    }
-                }
-            } else {
-                logger.error("Error from LLM API (non-streaming): {} - {}", response.getStatusCode(), response.getBody());
-                return "Error: Could not get a response from AI.";
-            }
-        } catch (Exception e) {
-            logger.error("Exception while calling LLM API (non-streaming)", e);
-            return "Error: Exception occurred while contacting AI service.";
-        }
-        return "Error: No response from AI.";
-    }
-
+    
     /**
      * Gets a completion from a vision-enabled LLM using multimodal content (text + image/PDF).
      * <p>
@@ -316,11 +398,9 @@ public class OpenAIService {
      * @return The LLM's response as text, or an error message if processing fails
      * @throws IllegalArgumentException if multimodalContent or llmId is null
      * @see #getMultimodalCompletionStream(Object, String)
-     */
-    public String getMultimodalCompletion(Object multimodalContent, String llmId) {
+     */    public String getMultimodalCompletion(Object multimodalContent, String llmId) {
         logger.info("Processing multimodal content with model: {}", llmId);
-        
-        // Prepare the request body for the OpenAI API
+          // Prepare the request body for the OpenAI API
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", llmId);
         
@@ -339,17 +419,12 @@ public class OpenAIService {
         userMessage.put("content", multimodalContent);
         messages.add(userMessage);
         requestBody.put("messages", messages);
-        
-        // For safety, set a reasonable maximum token limit
+          // For safety, set a reasonable maximum token limit
         requestBody.put("max_tokens", 2000);
         
-        // Add discovered MCP tools to request
-        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
-        if (mcpTools != null && !mcpTools.isEmpty()) {
-            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
-            logger.info("Adding {} MCP tools to multimodal LLM request", formattedTools.size());
-            requestBody.put("tools", formattedTools);
-        }
+        // Don't add tools for multimodal content - let the LLM use its native vision capabilities
+        // Adding tools confuses the LLM and makes it think it can't analyze images directly
+        logger.debug("Multimodal content detected. Not adding tools to let LLM focus on native vision capabilities for modelId: {}", llmId);
 
         try {
             // Build the URL
@@ -405,65 +480,45 @@ public class OpenAIService {
      *         Each chunk contains a portion of the response text.
      * @throws IllegalArgumentException if multimodalContent or modelId is null
      * @see #getMultimodalCompletion(Object, String)
-     */
-    public Flux<String> getMultimodalCompletionStream(Object multimodalContent, String modelId) {
+     */    public Flux<String> getMultimodalCompletionStream(Object multimodalContent, String modelId) {
         logger.info("Processing streaming multimodal content with model: {}", modelId);
         
-        // Prepare the request body for the OpenAI API
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", modelId);
-        requestBody.put("stream", true);
+        // Convert multimodal content to ChatMessage format for unified processing
+        List<ChatMessage> messages = new ArrayList<>();
         
-        // Convert the multimodal content to the format expected by the API
-        List<Map<String, Object>> messages = new ArrayList<>();
-        
-        // Add system message only if model supports multimodal content and content is actually multimodal
+        // Add system message if appropriate
         Map<String, Object> systemMessage = createMultimodalSystemMessage(modelId, multimodalContent);
         if (systemMessage != null) {
-            messages.add(systemMessage);
+            ChatMessage systemChatMsg = new ChatMessage();
+            systemChatMsg.setRole("system");
+            systemChatMsg.setContent((String) systemMessage.get("content"));
+            messages.add(systemChatMsg);
             logger.debug("Added multimodal system message for streaming model: {}", modelId);
         }
         
-        Map<String, Object> userMessage = new HashMap<>();
-        userMessage.put("role", "user");
-        userMessage.put("content", multimodalContent);
+        // Create user message with multimodal content
+        // Convert multimodal content to a string representation for ChatMessage storage
+        String multimodalContentString = convertMultimodalContentToString(multimodalContent);
+        
+        ChatMessage userMessage = new ChatMessage();
+        userMessage.setRole("user");
+        userMessage.setContent(multimodalContentString);
+        userMessage.setContentType("multipart/mixed"); // Indicate this is multimodal content
+        // Also store the original multimodal content object in rawContent for potential future use
+        userMessage.setRawContent(multimodalContentString);
         messages.add(userMessage);
-        requestBody.put("messages", messages);
         
-        // For safety, set a reasonable maximum token limit
-        requestBody.put("max_tokens", 2000);
+        logger.debug("Converted multimodal content to ChatMessage format for unified streaming. Content type: {}", userMessage.getContentType());
         
-        // Add discovered MCP tools to request
-        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
-        if (mcpTools != null && !mcpTools.isEmpty()) {
-            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
-            logger.info("Adding {} MCP tools to streaming multimodal LLM request", formattedTools.size());
-            requestBody.put("tools", formattedTools);
-        }
-
-        try {
-            // Convert request body to JSON string for logging
-            String requestJson = objectMapper.writeValueAsString(requestBody);
-            logger.debug("Multimodal stream request: {}", requestJson);
-            
-            // Make the streaming API call
-            return webClient.post()
-                .uri("/chat/completions")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(requestBody)
-                .accept(MediaType.TEXT_EVENT_STREAM)
-                .retrieve()
-                .bodyToFlux(String.class)
-                .map(this::extractContentFromStreamResponse)
-                .filter(content -> content != null && !content.isEmpty());
-        } catch (Exception e) {
-            logger.error("Error in multimodal streaming", e);
-            return Flux.error(new RuntimeException("Error processing multimodal streaming content: " + e.getMessage()));
-        }
+        // Use the same robust streaming framework as text-only streaming
+        // This ensures proper tool call handling and stream management
+        AtomicBoolean cancellationFlag = new AtomicBoolean(false);
+        
+        return Flux.create(sink -> {
+            executeStreamingConversationWithToolsInternal(messages, modelId, sink, null, cancellationFlag);
+        });
     }
-    
-    /**
+      /**
      * Extracts content from a streaming response chunk received from the LLM API.
      * <p>
      * This helper method parses individual chunks of the server-sent events (SSE) stream
@@ -481,28 +536,34 @@ public class OpenAIService {
      * @param jsonChunk A single JSON chunk from the streaming API response
      * @return The extracted content text, or empty string if no content is found or parsing fails
      */
-    private String extractContentFromStreamResponse(String jsonChunk) {
+    private String extractContentFromStreamResponse(String chunk) {
         try {
-            if (jsonChunk.startsWith("data: ")) {
-                jsonChunk = jsonChunk.substring(6);
-            }
-            if ("[DONE]".equals(jsonChunk)) {
+            if (chunk == null || chunk.isEmpty() || "data: [DONE]".equals(chunk)) {
                 return "";
             }
             
-            JsonNode jsonNode = objectMapper.readTree(jsonChunk);
-            if (jsonNode.has("choices") && jsonNode.get("choices").isArray() && 
-                jsonNode.get("choices").size() > 0) {
-                
-                JsonNode firstChoice = jsonNode.get("choices").get(0);
-                if (firstChoice.has("delta") && firstChoice.get("delta").has("content")) {
-                    return firstChoice.get("delta").get("content").asText();
+            String data = chunk.startsWith("data: ") ? chunk.substring(6) : chunk;
+            
+            // Skip empty or heartbeat chunks
+            if (data.isEmpty() || "[DONE]".equals(data)) {
+                return "";
+            }
+            
+            JsonNode responseNode = objectMapper.readTree(data);
+            
+            // Standard OpenAI format
+            if (responseNode.has("choices") && responseNode.path("choices").path(0).has("delta")) {
+                JsonNode deltaNode = responseNode.path("choices").path(0).path("delta");
+                if (deltaNode.has("content")) {
+                    return deltaNode.path("content").asText();
                 }
             }
-        } catch (JsonProcessingException e) {
-            logger.warn("Error parsing LLM API stream chunk: {}", e.getMessage());
+            
+            return "";
+        } catch (Exception e) {
+            logger.warn("Error parsing stream chunk: {}", e.getMessage());
+            return "";
         }
-        return "";
     }
     
     /**
@@ -576,8 +637,7 @@ public class OpenAIService {
         
         return "text";
     }
-    
-    /**
+      /**
      * Creates an appropriate system prompt based on content type and model capabilities.
      * 
      * @param contentType The detected content type
@@ -588,19 +648,31 @@ public class OpenAIService {
         switch (contentType) {
             case "image":
                 if (llmConfig.isSupportsImage()) {
-                    return "You are a vision-enabled AI assistant. When provided with images, focus on analyzing and describing the visual content directly. Provide detailed descriptions of what you can see in the image, including objects, people, text, scenes, colors, and any other relevant visual details. Only use tools if the user explicitly requests web crawling or additional information beyond what's visible in the image.";
+                    return "You are a vision-enabled AI assistant with native image analysis capabilities. You can directly analyze and describe visual content in images, including objects, people, text, scenes, colors, and other visual details. " +
+                           "When working with images, you have two capabilities: " +
+                           "1. Native vision analysis: You can directly see and analyze image content without needing tools " +
+                           "2. Tool usage: You can also use available tools when requested for tasks like web crawling, calculations, or accessing external information " +
+                           "Focus on providing detailed visual analysis of the image content, and use tools when they would enhance your response or when explicitly requested.";
                 }
                 break;
                 
             case "pdf":
                 if (llmConfig.isSupportsPdf()) {
-                    return "You are an AI assistant capable of analyzing PDF documents. When provided with PDF content, focus on understanding and analyzing the document structure, text content, and any visual elements within the PDF. Provide comprehensive analysis of the document content. Only use tools if the user explicitly requests web crawling or additional information beyond what's in the document.";
+                    return "You are an AI assistant with native PDF analysis capabilities. You can directly analyze PDF documents, understanding document structure, text content, and visual elements within PDFs. " +
+                           "When working with PDFs, you have two capabilities: " +
+                           "1. Native document analysis: You can directly read and analyze PDF content without needing tools " +
+                           "2. Tool usage: You can also use available tools when requested for tasks like web crawling, calculations, or accessing external information " +
+                           "Focus on providing comprehensive analysis of the document content, and use tools when they would enhance your response or when explicitly requested.";
                 }
                 break;
                 
             case "mixed":
                 if (llmConfig.isSupportsImage() || llmConfig.isSupportsPdf()) {
-                    return "You are a multimodal AI assistant capable of analyzing both images and documents. When provided with visual or document content, focus on analyzing and describing the content directly. Provide detailed analysis of all provided materials. Only use tools if the user explicitly requests web crawling or additional information beyond what's provided in the content.";
+                    return "You are a multimodal AI assistant with native capabilities to analyze both images and documents. You can directly process visual content, PDFs, and other multimedia materials. " +
+                           "When working with multimodal content, you have two capabilities: " +
+                           "1. Native multimodal analysis: You can directly see and analyze images, read documents, and process multimedia content without needing tools " +
+                           "2. Tool usage: You can also use available tools when requested for tasks like web crawling, calculations, or accessing external information " +
+                           "Focus on providing detailed analysis of all provided materials, and use tools when they would enhance your response or when explicitly requested.";
                 }
                 break;
                 
@@ -613,8 +685,7 @@ public class OpenAIService {
         
         return null;
     }
-    
-    /**
+      /**
      * Converts MCP tools to the format expected by OpenAI API.
      * 
      * <p>This method transforms tools discovered from Model Context Protocol (MCP) servers
@@ -623,8 +694,7 @@ public class OpenAIService {
      * 
      * @param mcpTools The list of tools from the MCP server
      * @return A list of tools in the format expected by OpenAI API
-     */
-    private List<Map<String, Object>> convertMcpToolsToOpenAIFormat(List<Map<String, Object>> mcpTools) {
+     */    private List<Map<String, Object>> convertMcpToolsToOpenAIFormat(List<Map<String, Object>> mcpTools) {
         if (mcpTools == null || mcpTools.isEmpty()) {
             return Collections.emptyList();
         }
@@ -637,109 +707,271 @@ public class OpenAIService {
             // Ensure the tool has the required "type": "function" field
             openAiTool.put("type", "function");
             
-            // If the MCP tool already has a function field, use it
+            // If the MCP tool already has a function field, use it but ensure parameters are properly formatted
             if (mcpTool.containsKey("function")) {
-                openAiTool.put("function", mcpTool.get("function"));
+                Map<String, Object> functionCopy = new HashMap<>();
+                
+                @SuppressWarnings("unchecked")
+                Map<String, Object> originalFunction = (Map<String, Object>) mcpTool.get("function");
+                
+                // Copy all properties from the original function
+                functionCopy.putAll(originalFunction);
+                  // Ensure parameters are properly formatted if they exist
+                if (functionCopy.containsKey("parameters")) {
+                    functionCopy.put("parameters", validateAndFormatParameters(functionCopy.get("parameters")));
+                }
+                // Note: Don't add empty parameters if not present - OpenAI allows functions without parameters
+                
+                openAiTool.put("function", functionCopy);
+                logger.debug("Using existing function definition with properly formatted parameters");
             } else {
                 // Create a function structure from the MCP tool properties
                 Map<String, Object> function = new HashMap<>();
                 
                 // Use the tool name as function name, or a default if not available
-                function.put("name", mcpTool.getOrDefault("name", 
-                        mcpTool.getOrDefault("id", "mcp_tool_" + openAiTools.size())));
+                String toolName = (String) mcpTool.getOrDefault("name", 
+                        mcpTool.getOrDefault("id", "mcp_tool_" + openAiTools.size()));
+                function.put("name", toolName);
                 
                 // Add description if available
                 if (mcpTool.containsKey("description")) {
                     function.put("description", mcpTool.get("description"));
                 }
-                
-                // Add parameters if available
-                if (mcpTool.containsKey("parameters")) {
-                    function.put("parameters", mcpTool.get("parameters"));
+                  // Handle inputSchema (from MCP) as parameters (for OpenAI)
+                if (mcpTool.containsKey("inputSchema")) {
+                    Map<String, Object> parameters = validateAndFormatParameters(mcpTool.get("inputSchema"));
+                    function.put("parameters", parameters);
+                } else if (mcpTool.containsKey("parameters")) {
+                    Map<String, Object> parameters = validateAndFormatParameters(mcpTool.get("parameters"));
+                    function.put("parameters", parameters);
                 }
-                
+                // Note: Don't add empty parameters if not present - OpenAI allows functions without parameters
                 openAiTool.put("function", function);
+                
+                logger.debug("Converted MCP tool '{}' to OpenAI format with type 'function'", toolName);
             }
-            
-            openAiTools.add(openAiTool);
+              openAiTools.add(openAiTool);
+        }
+        
+        // Log the completed tool conversion for debugging
+        if (!openAiTools.isEmpty()) {
+            try {
+                logger.debug("Converted {} MCP tools to OpenAI format. First tool: {}", 
+                    openAiTools.size(), objectMapper.writeValueAsString(openAiTools.get(0)));
+            } catch (JsonProcessingException e) {
+                logger.warn("Could not serialize converted tools for logging", e);
+            }
         }
         
         return openAiTools;
     }
     
-    /**
-     * Enhanced streaming method that handles tool calls and execution.
-     * 
-     * <p>This method extends the basic streaming functionality to support the complete
-     * tool calling workflow: detecting tool calls from LLM responses, executing them
-     * via MCP servers, and feeding results back to continue the conversation.</p>
-     * 
-     * @param conversationMessages The conversation history
-     * @param modelId The model to use for completions
-     * @return A Flux of strings containing the complete conversation including tool execution results
-     */
-    public Flux<String> getChatCompletionStreamWithToolExecution(
-            List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
+    // Definition for filterMcpTools
+    private List<Map<String, Object>> filterMcpTools(List<Map<String, Object>> allMcpTools, ToolSelectionRequest toolSelection) {
+        if (allMcpTools == null || allMcpTools.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // If toolSelection is null or tools are explicitly disabled via enableTools=false
+        if (toolSelection == null || !toolSelection.isEnableTools()) {
+            logger.debug("Tools are disabled by ToolSelectionRequest (null or enableTools=false). Using 0 tools.");
+            return Collections.emptyList();
+        }
+
+        // Tools are enabled (isEnableTools() is true)
+        List<String> enabledToolNames = toolSelection.getEnabledTools(); // This is List<String>
+
+        if (enabledToolNames == null || enabledToolNames.isEmpty()) {
+            // No specific tools listed, so all tools are considered enabled because enableTools is true.
+            logger.debug("ToolSelectionRequest has tools enabled with no specific list; using all {} available MCP tools.", allMcpTools.size());
+            return allMcpTools;
+        }
+
+        // Specific tools are listed, filter by name
+        logger.debug("ToolSelectionRequest is active, filtering for {} specified tool names: {}", enabledToolNames.size(), enabledToolNames);
         
-        return Flux.create(sink -> {
-            List<com.steffenhebestreit.ai_research.Model.ChatMessage> workingMessages = new ArrayList<>(conversationMessages);
-            executeStreamingConversationWithTools(workingMessages, modelId, sink);
-        }, reactor.core.publisher.FluxSink.OverflowStrategy.BUFFER);
+        return allMcpTools.stream()
+            .filter(toolMap -> {
+                String toolName = null;
+                // MCP tools might have name directly, or under "function" if already partially formatted
+                // Prefer "function.name" if available from OpenAI formatting, then direct "name" from MCP
+                Object functionProperty = toolMap.get("function");
+                if (functionProperty instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> funcDetails = (Map<String, Object>) functionProperty;
+                    toolName = (String) funcDetails.get("name");
+                }
+                if (toolName == null && toolMap.containsKey("name")) { // Fallback to top-level "name" from MCP tool definition
+                     toolName = (String) toolMap.get("name"); 
+                }
+                
+                boolean match = toolName != null && enabledToolNames.contains(toolName);
+                if (match) {
+                    logger.trace("Tool '{}' matched enabled tool list.", toolName);
+                } else {
+                    logger.trace("Tool '{}' did not match enabled tool list: {}", toolName, enabledToolNames);
+                }
+                return match;            })
+            .collect(Collectors.toList());
     }
     
     /**
-     * Enhanced streaming method with tool execution using default model.
+     * Validates and formats the parameters object for OpenAI function calling.
+     * <p>
+     * This helper method ensures that the parameters object has the required structure
+     * according to OpenAI's function calling API specifications. It validates that:
+     * <ul>
+     *   <li>The "type" field is set to "object"</li>
+     *   <li>A "properties" object exists (creating an empty one if absent)</li>
+     *   <li>All nested schema objects have proper formats</li>
+     * </ul>
      * 
-     * <p>Convenience method that uses the default model configured in properties.
-     * Equivalent to calling getChatCompletionStreamWithToolExecution(conversationMessages, defaultModel).</p>
-     * 
-     * @param conversationMessages The conversation history
-     * @return A Flux of strings containing the complete conversation including tool execution results
+     * @param rawParameters The raw parameters object from MCP format
+     * @return A properly formatted parameters object for OpenAI
      */
-    public Flux<String> getChatCompletionStreamWithToolExecution(
-            List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages) {
-        return getChatCompletionStreamWithToolExecution(conversationMessages, openAIProperties.getModel());
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> validateAndFormatParameters(Object rawParameters) {
+        if (rawParameters == null) {
+            Map<String, Object> defaultParams = new HashMap<>();
+            defaultParams.put("type", "object");
+            defaultParams.put("properties", new HashMap<>());
+            return defaultParams;
+        }
+        
+        if (!(rawParameters instanceof Map)) {
+            logger.warn("Parameters is not a Map object. Creating default parameters structure.");
+            Map<String, Object> defaultParams = new HashMap<>();
+            defaultParams.put("type", "object");
+            defaultParams.put("properties", new HashMap<>());
+            return defaultParams;
+        }
+        
+        Map<String, Object> parameters = new HashMap<>((Map<String, Object>) rawParameters);
+        
+        // Ensure type is set to "object" as required by OpenAI
+        if (!parameters.containsKey("type")) {
+            parameters.put("type", "object");
+        }
+        
+        // Ensure properties exists
+        if (!parameters.containsKey("properties")) {
+            parameters.put("properties", new HashMap<>());
+        } else if (!(parameters.get("properties") instanceof Map)) {
+            logger.warn("Properties is not a Map object. Creating empty properties.");
+            parameters.put("properties", new HashMap<>());
+        }
+        
+        // Log the formatted parameters for debugging
+        try {
+            logger.debug("Formatted parameters for OpenAI: {}", 
+                objectMapper.writeValueAsString(parameters));
+        } catch (JsonProcessingException e) {
+            logger.warn("Could not serialize parameters for logging", e);
+        }
+        
+        return parameters;
     }
+    
+    // Updated executeStreamingConversationWithToolsInternal
+    private void executeStreamingConversationWithToolsInternal(
+            List<com.steffenhebestreit.ai_research.Model.ChatMessage> originalMessages,
+            String modelId,
+            FluxSink<String> sink,
+            ToolSelectionRequest toolSelection,
+            AtomicBoolean cancellationFlag) {
 
-    /**
-     * Executes a complete streaming conversation with tool support.
-     * 
-     * @param messages The current conversation messages
-     * @param modelId The model to use
-     * @param sink The flux sink to emit results to
-     */
-    private void executeStreamingConversationWithTools(
-            List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
-            String modelId, 
-            reactor.core.publisher.FluxSink<String> sink) {
-        
-        // Track whether tool calls were detected to manage completion properly
-        final java.util.concurrent.atomic.AtomicBoolean toolCallsDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
-        final java.util.concurrent.atomic.AtomicBoolean streamCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
-        final java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress = new java.util.concurrent.atomic.AtomicBoolean(false);
-        
-        // Build messages for LLM using the helper method
-        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messages);
+        final AtomicBoolean sinkClosed = new AtomicBoolean(false);
+        // Create a mutable copy of messages that can be modified
+        // Use an AtomicReference to hold our messages list so we can modify it safely from lambdas
+        final AtomicReference<List<ChatMessage>> messagesRef = new AtomicReference<>(new ArrayList<>(originalMessages));
 
-        if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && messages.isEmpty())) {
-            sink.error(new IllegalArgumentException("Cannot send an effectively empty message list to LLM."));
+        if (cancellationFlag.get()) {
+            tryCloseSinkWithError(sink, sinkClosed, new CancellationException("Stream cancelled by client before start."), modelId, cancellationFlag);
             return;
+        }
+        
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messagesRef.get());
+
+        if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && messagesRef.get().isEmpty())) {
+            tryCloseSinkWithError(sink, sinkClosed, new IllegalArgumentException("Cannot send an effectively empty message list to LLM."), modelId, cancellationFlag);
+            return;
+        }
+
+        // Log information about multimodal content for debugging
+        for (int i = 0; i < messagesForLlm.size(); i++) {
+            Map<String, Object> msgMap = messagesForLlm.get(i);
+            if (i < messagesRef.get().size() && "multipart/mixed".equals(messagesRef.get().get(i).getContentType())) {
+                logger.debug("Sending multimodal content in message {} to LLM model {}. Role: {}", 
+                    i, modelId, msgMap.get("role"));
+            }
         }
 
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", modelId);
         requestBody.put("messages", messagesForLlm);
-        requestBody.put("stream", true);
+        requestBody.put("stream", true);        // Check if we have multimodal content in the messages
+        boolean hasMultimodalContent = messagesRef.get().stream()
+            .anyMatch(msg -> "multipart/mixed".equals(msg.getContentType()));
         
-        // Add MCP tools
-        List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
-        if (mcpTools != null && !mcpTools.isEmpty()) {
-            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
-            logger.info("Adding {} MCP tools to LLM request for tool execution stream", formattedTools.size());
-            requestBody.put("tools", formattedTools);
+        // Get MCP tools and handle tool selection
+        List<Map<String, Object>> allMcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
+        // toolsForRequest must be effectively final for use in lambda
+        final List<Map<String, Object>> finalToolsForRequest;
+        
+        ToolSelectionRequest effectiveToolSelection = toolSelection;
+        if (effectiveToolSelection == null) {
+            effectiveToolSelection = new ToolSelectionRequest(true, null);
+            logger.debug("No ToolSelectionRequest provided, defaulting to enableTools=true, enabledTools=null (effectively 'all available tools').");
         }
 
-        String path = "/chat/completions";
+        // Don't include tools when we have multimodal content - let the LLM use its native vision capabilities
+        if (hasMultimodalContent) {
+            logger.info("Multimodal content detected. Excluding tools to let LLM focus on native vision capabilities for modelId: {}", modelId);
+            finalToolsForRequest = Collections.emptyList();
+        } else if (allMcpTools != null && !allMcpTools.isEmpty() && effectiveToolSelection.isEnableTools()) {
+            List<Map<String, Object>> filteredMcpTools = filterMcpTools(allMcpTools, effectiveToolSelection);
+            if (!filteredMcpTools.isEmpty()) {
+                List<Map<String, Object>> convertedTools = convertMcpToolsToOpenAIFormat(filteredMcpTools);
+                if (!convertedTools.isEmpty()) {
+                    logger.info("Adding {} formatted tools to LLM request for modelId: {} (filtered from {} MCP tools based on selection: {})",
+                            convertedTools.size(), modelId, allMcpTools.size(), effectiveToolSelection.getEnabledTools());
+                    requestBody.put("tools", convertedTools);
+                    finalToolsForRequest = convertedTools;
+                } else {
+                     logger.info("No tools to include in request for modelId: {} after formatting filtered MCP tools. Filtered count: {}, All MCP: {}", modelId, filteredMcpTools.size(), allMcpTools.size());
+                     finalToolsForRequest = Collections.emptyList();
+                }
+            } else {
+                logger.info("No tools to include in request for modelId: {} due to tool selection filter on MCP tools. All MCP: {}, Selection: {}", modelId, allMcpTools.size(), effectiveToolSelection.getEnabledTools());
+                finalToolsForRequest = Collections.emptyList();
+            }
+        } else if (allMcpTools == null || allMcpTools.isEmpty()){
+             logger.debug("No MCP tools available to add to LLM request for modelId: {}", modelId);
+             finalToolsForRequest = Collections.emptyList();
+        } else { 
+            logger.debug("Tools are disabled for modelId: {} as per ToolSelectionRequest.", modelId);
+            finalToolsForRequest = Collections.emptyList();
+        }
+
+        StringBuilder assistantResponseContent = new StringBuilder();
+        Map<Integer, StreamingToolCall> activeToolCalls = new HashMap<>();
+        AtomicReference<String> finishReasonRef = new AtomicReference<>();
+        AtomicReference<String> currentLlmRole = new AtomicReference<>(); // Stores the role from the current LLM delta
+        
+        String path = "/chat/completions"; // API endpoint path
+        logger.info("Initiating streaming request to LLM path: {} for model: {} with {} messages", path, modelId, messagesForLlm.size());
+        
+        // Log the first few characters of the request body for debugging (without exposing sensitive data)
+        try {
+            String requestBodyJson = objectMapper.writeValueAsString(requestBody);
+            logger.debug("Request body size: {} characters for model: {}", requestBodyJson.length(), modelId);
+            if (logger.isTraceEnabled()) {
+                // Only log full request in trace mode to avoid cluttering logs
+                logger.trace("Full request body for model {}: {}", modelId, requestBodyJson);
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to serialize request body for logging: {}", e.getMessage());
+        }
 
         webClient.post()
                 .uri(path)
@@ -748,825 +980,1138 @@ public class OpenAIService {
                 .bodyValue(requestBody)
                 .retrieve()
                 .bodyToFlux(String.class)
-                .doOnNext(rawEvent -> {
-                    logger.debug("Raw streaming event: {}", rawEvent);
-                    // Also log if it contains tool_calls for easier debugging
-                    if (rawEvent.contains("tool_calls")) {
-                        logger.info("Raw event contains tool_calls: {}", rawEvent);
-                    }
+                .doOnSubscribe(sub -> logger.info("Started stream subscription for model: {} with {} messages", modelId, messagesForLlm.size()))
+                .doOnNext(event -> logger.trace("Received raw stream event for model {}: {}", modelId, event))
+                .doOnError(error -> logger.error("Stream error for model {}: {}", modelId, error.getMessage(), error))
+                .takeUntil(event -> cancellationFlag.get() || sinkClosed.get())
+                .doOnCancel(() -> {
+                    logger.info("WebClient Flux externally cancelled for modelId: {}. Setting cancellation flag.", modelId);
+                    cancellationFlag.set(true);
                 })
-                .map(String::trim)
-                .filter(trimmedEvent -> !"[DONE]".equalsIgnoreCase(trimmedEvent))
                 .subscribe(
-                    jsonChunk -> {
-                        try {
-                            if ("[DONE]".equalsIgnoreCase(jsonChunk.trim())) {
+                        rawEvent -> {
+                            if (cancellationFlag.get() || sinkClosed.get()) return;
+
+                            logger.debug("Raw streaming event for modelId {}: {}", modelId, rawEvent);
+                            String jsonChunk = rawEvent.trim();
+                            if (jsonChunk.startsWith("data: ")) {
+                                jsonChunk = jsonChunk.substring(6).trim();
+                            }
+                            if ("[DONE]".equalsIgnoreCase(jsonChunk) || jsonChunk.isEmpty()) {
                                 return;
                             }
-                            
-                            JsonNode rootNode = objectMapper.readTree(jsonChunk);
-                            JsonNode choicesNode = rootNode.path("choices");
-                            if (choicesNode.isArray() && !choicesNode.isEmpty()) {
-                                JsonNode firstChoice = choicesNode.get(0);
-                                JsonNode deltaNode = firstChoice.path("delta");
-                                JsonNode finishReasonNode = firstChoice.path("finish_reason");
+
+                            try {
+                                Map<String, Object> chunkMap = objectMapper.readValue(jsonChunk, new TypeReference<Map<String, Object>>() {});
                                 
-                                // Check for tool calls in delta (for name detection)
-                                JsonNode toolCallsNode = deltaNode.path("tool_calls");
-                                if (toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
-                                    logger.info("Found tool calls in streaming delta: {}", toolCallsNode.toString());
-                                    for (JsonNode toolCallNode : toolCallsNode) {
-                                        JsonNode functionNode = toolCallNode.path("function");
-                                        if (!functionNode.isMissingNode()) {
-                                            JsonNode nameNode = functionNode.path("name");
-                                            if (nameNode.isTextual()) {
-                                                String toolName = nameNode.asText();
-                                                sink.next("[Calling tool: " + toolName + "] ");
-                                                logger.info("Detected tool call in stream: {}", toolName);
+                                @SuppressWarnings("unchecked")
+                                List<Map<String, Object>> choices = (List<Map<String, Object>>) chunkMap.get("choices");
+                                if (choices != null && !choices.isEmpty()) {
+                                    Object choiceObj = choices.get(0);
+                                    if (choiceObj instanceof Map) {
+                                        @SuppressWarnings("unchecked")
+                                        Map<String, Object> choice = (Map<String, Object>) choiceObj;
+                                        
+                                        // Check for content in delta
+                                        Object deltaObj = choice.get("delta");
+                                        if (deltaObj instanceof Map) {
+                                            @SuppressWarnings("unchecked")
+                                            Map<String, Object> delta = (Map<String, Object>) deltaObj;
+                                            Object contentObj = delta.get("content");
+                                            if (contentObj instanceof String) {
+                                                String content = (String) contentObj;
+                                                currentLlmRole.set("assistant");
+                                                assistantResponseContent.append(content);
+                                                if (!sinkClosed.get()) {
+                                                    sink.next(content);
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Check for finish reason
+                                        Object finishReasonObj = choice.get("finish_reason");
+                                        if (finishReasonObj instanceof String) {
+                                            finishReasonRef.set((String) finishReasonObj);
+                                        }
+                                        
+                                        // Check for tool calls in message
+                                        Object messageObj = choice.get("message");
+                                        if (messageObj instanceof Map) {
+                                            @SuppressWarnings("unchecked")
+                                            Map<String, Object> message = (Map<String, Object>) messageObj;
+                                            if (message.containsKey("tool_calls")) {
+                                                @SuppressWarnings("unchecked")
+                                                List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) message.get("tool_calls");
+                                                if (toolCalls != null && !toolCalls.isEmpty()) {
+                                                    currentLlmRole.set("tool");
+                                                    // Process tool calls - this was missing in the previous implementation
+                                                    for (Map<String, Object> toolCall : toolCalls) {
+                                                        Integer index = toolCall.containsKey("index") ? 
+                                                                            ((Number) toolCall.get("index")).intValue() : 
+                                                                            activeToolCalls.size();
+                                                            
+                                                        if (!activeToolCalls.containsKey(index)) {
+                                                            activeToolCalls.put(index, new StreamingToolCall(index));
+                                                        }
+                                                            
+                                                        StreamingToolCall stc = activeToolCalls.get(index);
+                                                            
+                                                        if (toolCall.containsKey("id")) {
+                                                            stc.setId((String) toolCall.get("id"));
+                                                        }
+                                                            
+                                                        if (toolCall.containsKey("type")) {
+                                                            stc.setType((String) toolCall.get("type"));
+                                                        }
+                                                            
+                                                        // Process function data if present
+                                                        if (toolCall.containsKey("function")) {
+                                                            @SuppressWarnings("unchecked")
+                                                            Map<String, Object> function = (Map<String, Object>) toolCall.get("function");
+                                                            
+                                                            if (function.containsKey("name")) {
+                                                                stc.appendName((String) function.get("name"));
+                                                            }
+                                                            
+                                                            if (function.containsKey("arguments")) {
+                                                                stc.appendArguments((String) function.get("arguments"));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Check for tool calls in delta
+                                        Object deltaToolCallsObj = null;
+                                        if (deltaObj instanceof Map) {
+                                            @SuppressWarnings("unchecked")
+                                            Map<String, Object> delta = (Map<String, Object>) deltaObj;
+                                            deltaToolCallsObj = delta.get("tool_calls");
+                                        }
+                                        
+                                        if (deltaToolCallsObj instanceof List) {
+                                            @SuppressWarnings("unchecked")
+                                            List<Map<String, Object>> deltaToolCalls = (List<Map<String, Object>>) deltaToolCallsObj;
+                                            if (!deltaToolCalls.isEmpty()) {
+                                                currentLlmRole.set("tool");
+                                                // Process delta tool calls
+                                                for (Map<String, Object> deltaToolCall : deltaToolCalls) {
+                                                    Integer index = deltaToolCall.containsKey("index") ?
+                                                                      ((Number) deltaToolCall.get("index")).intValue() :
+                                                                      activeToolCalls.size();
+                                                
+            
+                                                    if (!activeToolCalls.containsKey(index)) {
+                                                        activeToolCalls.put(index, new StreamingToolCall(index));
+                                                    }
+                                                
+            
+                                                    StreamingToolCall stc = activeToolCalls.get(index);
+                                                
+            
+                                                    if (deltaToolCall.containsKey("id")) {
+                                                        stc.setId((String) deltaToolCall.get("id"));
+                                                    }
+                                                
+            
+                                                    if (deltaToolCall.containsKey("type")) {
+                                                        stc.setType((String) deltaToolCall.get("type"));
+                                                    }
+                                                
+            
+                                                    // Process function delta data
+                                                    if (deltaToolCall.containsKey("function")) {
+                                                        @SuppressWarnings("unchecked")
+                                                        Map<String, Object> function = (Map<String, Object>) deltaToolCall.get("function");
+                                                
+            
+                                                        if (function.containsKey("name")) {
+                                                            stc.appendName((String) function.get("name"));
+                                                        }
+                                                
+            
+                                                        if (function.containsKey("arguments")) {
+                                                            stc.appendArguments((String) function.get("arguments"));
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                } else {
-                                    // Regular content
-                                    JsonNode contentNode = deltaNode.path("content");
-                                    if (contentNode.isTextual()) {
-                                        sink.next(contentNode.asText());
-                                    }
                                 }
-                                
-                                // Check finish reason
-                                if (finishReasonNode.isTextual()) {
-                                    String finishReason = finishReasonNode.asText();
-                                    logger.info("Stream finished with reason: {}", finishReason);
-                                    
-                                    if ("tool_calls".equals(finishReason)) {
-                                        // Set flag and handle tool calls
-                                        toolCallsDetected.set(true);
-                                        streamCompleted.set(true);
-                                        
-                                        // Prevent concurrent tool execution
-                                        if (toolExecutionInProgress.compareAndSet(false, true)) {
-                                            sink.next("[Executing tools...]");
-                                            handleToolCallsCompletion(messages, modelId, sink, toolExecutionInProgress);
-                                        } else {
-                                            logger.warn("Tool execution already in progress, ignoring duplicate tool_calls finish reason");
-                                        }
-                                    } else if (!toolCallsDetected.get() && streamCompleted.compareAndSet(false, true)) {
-                                        // Only complete if no tool calls were detected and not already completed
-                                        logger.info("Completing sink after normal conversation");
-                                        sink.complete();
-                                    }
-                                }
+                            } catch (JsonProcessingException e) {
+                                logger.error("Error parsing streaming JSON chunk for modelId {}: '{}'. Terminating stream.", modelId, jsonChunk, e);
+                                tryCloseSinkWithError(sink, sinkClosed, e, modelId, cancellationFlag);
+                            } catch (Exception e) { 
+                                logger.error("Unexpected error processing streaming chunk for modelId {}: '{}'. Terminating stream.", modelId, jsonChunk, e);
+                                tryCloseSinkWithError(sink, sinkClosed, e, modelId, cancellationFlag);
                             }
-                        } catch (JsonProcessingException e) {
-                            logger.error("Error parsing streaming JSON chunk: '{}'", jsonChunk, e);
-                        } catch (Exception e) {
-                            logger.error("Unexpected error processing streaming chunk: '{}'", jsonChunk, e);
-                        }
-                    },
-                    error -> {
-                        logger.error("Error in streaming response", error);
-                        sink.error(error);
-                    },
-                    () -> {
-                        // Only complete if no tool calls were detected and not already completed
-                        if (!toolCallsDetected.get() && streamCompleted.compareAndSet(false, true)) {
-                            logger.info("Streaming completed without tool calls");
-                            sink.complete();
-                        } else {
-                            logger.debug("Streaming completed - tool calls handler will manage completion or already completed");
-                        }
-                    }
-                );
-    }    
-    /**
-     * Processes tool call delta from streaming response.
-     */
-    private void processToolCallDelta(JsonNode toolCallsNode, reactor.core.publisher.FluxSink<String> sink) {
-        for (JsonNode toolCallNode : toolCallsNode) {
-            JsonNode functionNode = toolCallNode.path("function");
-            if (!functionNode.isMissingNode()) {
-                JsonNode nameNode = functionNode.path("name");
-                JsonNode argsNode = functionNode.path("arguments");
-                
-                if (nameNode.isTextual()) {
-                    String toolName = nameNode.asText();
-                    sink.next("\n[Calling tool: " + toolName + "]");
-                }
-                
-                if (argsNode.isTextual()) {
-                    // Tool arguments are being streamed
-                    // For now, just indicate that tool call is in progress
-                    // We'll collect the full arguments when the stream completes
-                }
-            }
-        }
-    }
-    
-    /**
-     * Handles completion of tool calls and continues the conversation.
-     */    private void handleToolCallsCompletion(
-        List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
-        String modelId, 
-        reactor.core.publisher.FluxSink<String> sink,
-        java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
-        
-        // Use reactive approach to avoid blocking in reactive context
-        getChatCompletionForToolCallsReactive(messages, modelId)
-            .subscribe(
-                toolCallsResponse -> {
-                    try {
-                        // Parse the response to extract tool calls
-                        JsonNode responseNode = objectMapper.readTree(toolCallsResponse);
-                        JsonNode choicesNode = responseNode.path("choices");
-                        if (choicesNode.isArray() && !choicesNode.isEmpty()) {
-                            JsonNode firstChoice = choicesNode.get(0);
-                            JsonNode messageNode = firstChoice.path("message");
-                            JsonNode toolCallsNode = messageNode.path("tool_calls");
-                            
-                            if (toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
-                                // Track success/failure for logging
-                                int totalTools = toolCallsNode.size();
-                                int successCount = 0;
-                                int failureCount = 0;
-                                
-                                // Execute each tool call independently
-                                for (JsonNode toolCallNode : toolCallsNode) {
-                                    try {
-                                        boolean success = executeToolCallFromNode(toolCallNode, messages, sink);
-                                        if (success) {
-                                            successCount++;
-                                        } else {
-                                            failureCount++;
-                                            logger.warn("Tool execution failed but continuing with other tools");
-                                        }
-                                    } catch (Exception e) {
-                                        failureCount++;
-                                        logger.error("Exception during tool execution but continuing with other tools", e);
-                                        
-                                        // Add error message to conversation for this specific tool
-                                        try {
-                                            String toolName = toolCallNode.path("function").path("name").asText("unknown-tool");
-                                            String toolId = toolCallNode.path("id").asText("unknown-id");
-                                              sink.next("\n[Tool '" + toolName + "' execution error: " + e.getMessage() + "]\n");
-                                            
-                                            // Add a tool message with the error for the LLM to understand what happened
-                                            com.steffenhebestreit.ai_research.Model.ChatMessage errorMessage = 
-                                                new com.steffenhebestreit.ai_research.Model.ChatMessage();
-                                            errorMessage.setRole("tool");
-                                            errorMessage.setToolCallId(toolId);
-                                            
-                                            // Create a more detailed error message with guidance
-                                            StringBuilder errorContent = new StringBuilder();
-                                            errorContent.append("Error executing tool '").append(toolName).append("' (ID: ").append(toolId).append("): ")
-                                                      .append(e.getMessage());
-                                            
-                                            // Add helpful instructions for the LLM
-                                            errorContent.append("\n\nPlease check your parameters and try again with a corrected tool call. ")
-                                                      .append("Make sure all required parameters are provided and all parameter types match the expected format.");
-                                            
-                                            errorMessage.setContent(errorContent.toString());
-                                            messages.add(errorMessage);
-                                        } catch (Exception ex) {
-                                            logger.error("Error creating tool error message", ex);
-                                        }
-                                    }
-                                }
-                                  // Log the summary of tool executions
-                                logger.info("Tool execution summary: {} total, {} succeeded, {} failed", 
-                                           totalTools, successCount, failureCount);
-                                
-                                // Continue conversation with tool results (whether successful or failed)
-                                String continuationMessage = "\n[Continuing conversation with " + successCount + " successful and " + 
-                                         failureCount + " failed tool results";
-                                
-                                // Add instructions for the LLM on how to handle failed tools
-                                if (failureCount > 0) {
-                                    continuationMessage += ". Please review the tool error messages and try again with corrected parameters if needed";
-                                }
-                                continuationMessage += "]\n";
-                                
-                                sink.next(continuationMessage);
-                                
-                                // Continue the conversation within the same reactive context
-                                continueConversationAfterTools(messages, modelId, sink, toolExecutionInProgress);
+                        },
+                        error -> { 
+                            if (cancellationFlag.get() && !(error instanceof CancellationException)) {
+                                logger.info("WebClient Flux error for modelId {} during cancellation: {}", modelId, error.getMessage());
+                                tryCloseSinkWithError(sink, sinkClosed, new CancellationException("Stream cancelled, underlying error: " + error.getMessage()), modelId, cancellationFlag);
+                            } else {
+                                logger.error("Error in streaming response from WebClient for modelId {}:", modelId, error);
+                                tryCloseSinkWithError(sink, sinkClosed, error, modelId, cancellationFlag);
+                            }
+                        },
+                        () -> { 
+                            if (cancellationFlag.get()) {
+                                logger.info("WebClient Flux completed for modelId {}, but operation was cancelled.", modelId);
+                                tryCloseSinkWithError(sink, sinkClosed, new CancellationException("Stream cancelled before natural completion."), modelId, cancellationFlag);
                                 return;
                             }
+                            if (sinkClosed.get()) { 
+                                logger.info("WebClient Flux completed for modelId {}, but sink was already closed.", modelId);
+                                return;
+                            }
+
+                            String finishReason = finishReasonRef.get();
+                            logger.info("LLM stream completed for modelId {}. Final finish_reason: {}", modelId, finishReason);
+
+                            com.steffenhebestreit.ai_research.Model.ChatMessage assistantMessage = new com.steffenhebestreit.ai_research.Model.ChatMessage();
+                            assistantMessage.setRole(currentLlmRole.get() != null ? currentLlmRole.get() : "assistant"); // Use observed role or default to assistant
+                            String accumulatedContent = assistantResponseContent.toString();
+                            assistantMessage.setContent(accumulatedContent.isEmpty() ? null : accumulatedContent);
+                            
+                            List<Map<String, Object>> completedToolCallMaps = new ArrayList<>();
+                            activeToolCalls.values().forEach(stc -> {
+                                if (stc.isComplete()) {
+                                    completedToolCallMaps.add(stc.build());
+                                } else {
+                                    logger.warn("Dropping incomplete tool call during assembly: Index {}, ID {}, Name '{}', Args (partial) '{}'", 
+                                        stc.index, stc.id, stc.functionName.toString(), stc.functionArguments.toString().substring(0, Math.min(50, stc.functionArguments.length())));
+                                }
+                            });
+
+                            if (!completedToolCallMaps.isEmpty()) {
+                                assistantMessage.setToolCalls(completedToolCallMaps);
+                            }
+
+                            if (assistantMessage.getContent() != null || (assistantMessage.getToolCalls() != null && !assistantMessage.getToolCalls().isEmpty())) {
+                                // Create a final copy for lambda use
+                                final ChatMessage finalAssistantMessage = assistantMessage;
+                                
+                                // Update our mutable messages list in the AtomicReference
+                                List<ChatMessage> currentMessages = messagesRef.get();
+                                List<ChatMessage> updatedMessages = new ArrayList<>(currentMessages);
+                                updatedMessages.add(finalAssistantMessage);
+                                messagesRef.set(updatedMessages);
+                            }
+
+                            if ("tool_calls".equals(finishReason) && !completedToolCallMaps.isEmpty()) {
+                                if (!sinkClosed.get()) { 
+                                    sink.next("\\n[Tool calls requested by LLM. Executing tools...]\\n");
+                                }
+                                LlmConfiguration llmConfig = llmCapabilityService.getLlmConfiguration(modelId);
+                                if (llmConfig == null) {
+                                    logger.warn("LlmConfiguration not found for modelId: {}. Proceeding with tool execution but some capabilities might be unknown.", modelId);
+                                    llmConfig = new LlmConfiguration(); 
+                                    llmConfig.setId(modelId); 
+                                }
+                                
+                                // Use finalToolsForRequest here
+                                final LlmConfiguration finalLlmConfig = llmConfig;
+                                
+                                // Use the current messages from our AtomicReference
+                                handleToolCallsAndContinue(completedToolCallMaps, messagesRef.get(), modelId, sink, toolSelection, 
+                                    cancellationFlag, sinkClosed, finalLlmConfig, finalToolsForRequest);
+                            } else {
+                                if ("tool_calls".equals(finishReason) && completedToolCallMaps.isEmpty()) {
+                                     logger.warn("Finish reason was 'tool_calls' but no complete tool calls were assembled for modelId {}. Treating as normal completion.", modelId);
+                                }
+                                tryCloseSinkWithCompletion(sink, sinkClosed, modelId, "Normal completion after conversation", cancellationFlag);
+                            }
                         }
+                );
+    }    private void handleToolCallsAndContinue(
+        List<Map<String, Object>> completedToolCalls, 
+        final List<ChatMessage> originalCurrentMessages,
+        String modelId,
+        FluxSink<String> sink,
+        ToolSelectionRequest toolSelection,
+        AtomicBoolean cancellationFlag,
+        AtomicBoolean sinkClosed,
+        LlmConfiguration llmConfiguration, 
+        List<Map<String, Object>> availableTools
+    ) {
+        // Create a mutable copy of the messages to work with
+        final List<ChatMessage> currentMessages = new ArrayList<>(originalCurrentMessages);
+        
+        if (cancellationFlag.get()) {
+            logger.info("handleToolCallsAndContinue: Cancellation detected for modelId: {}. Aborting tool call processing.", modelId);
+            tryCloseSinkWithError(sink, sinkClosed, new CancellationException("Tool call handling cancelled for modelId: " + modelId), modelId, cancellationFlag);
+            return;
+        }
+        if (sinkClosed.get()) {
+            logger.info("handleToolCallsAndContinue: Sink already closed for modelId: {}. Aborting tool call processing.", modelId);
+            return;
+        }
+
+        List<Mono<ChatMessage>> toolExecutionMonos = new ArrayList<>();
+
+        for (Map<String, Object> toolCall : completedToolCalls) {
+            if (cancellationFlag.get() || sinkClosed.get()) {
+                logger.info("handleToolCallsAndContinue: Skipping further tool processing due to cancellation or closed sink for modelId: {}", modelId);
+                break; 
+            }
+
+            Mono<ChatMessage> toolResponseMono = executeToolCallFromNode(toolCall, availableTools, llmConfiguration, modelId)
+                .doOnSuccess(toolResponse -> { 
+                    if (toolResponse == null) { 
+                        logger.warn("Tool execution for modelId {} returned null response for tool call: {}", modelId, toolCall.get("id"));
+                    }
+                })
+                .doOnError(e -> {
+                    logger.error("Error during execution setup or subscription for a tool for modelId {}: {}. Tool ID: {}", modelId, e.getMessage(), toolCall.get("id"));
+                });
+            toolExecutionMonos.add(toolResponseMono);
+        }
+
+        if (toolExecutionMonos.isEmpty()) {
+            if (!completedToolCalls.isEmpty()) {
+                 logger.warn("No tool execution Monos created for modelId {} despite having {} completed tool calls. Likely due to prior cancellation/closure.", modelId, completedToolCalls.size());
+            }
+            tryCloseSinkWithCompletion(sink, sinkClosed, modelId, "No tools processed or all skipped, completing current step.", cancellationFlag);
+            return;
+        }
+
+        // Execute tool calls sequentially, collect all results, delay errors.
+        Flux.fromIterable(toolExecutionMonos)
+            .concatMapDelayError(java.util.function.Function.identity()) // Process Monos sequentially, delaying errors
+            .collectList() // Collects all ChatMessage results from successfully completed Monos
+            .subscribe(
+                successfulResponses -> { // successfulResponses is List<ChatMessage> from successfully executed tool calls
+                    if (cancellationFlag.get()) {
+                        logger.info("Tool executions completed for modelId {}, but operation was cancelled before continuing conversation.", modelId);
+                        tryCloseSinkWithError(sink, sinkClosed, new CancellationException("Tool processing completed but stream cancelled for modelId: " + modelId), modelId, cancellationFlag);
+                        return;
+                    }
+                    if (sinkClosed.get()) {
+                        logger.info("Tool executions completed for modelId {}, but sink was already closed before continuing conversation.", modelId);
+                        return;
+                    }                    // Filter out null responses (from failed tool executions)
+                    final List<ChatMessage> validResponses = successfulResponses.stream()
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toList());
+                    
+                    // Create a final reference to currentMessages for lambda use                    // Create a variable to hold our messages for the lambda
+                    List<ChatMessage> effectiveMessages;
                         
-                        // No tool calls found, complete the conversation with a small delay
-                        logger.info("No tool calls found in response, completing stream with delay");
-                        // Reset tool execution flag since we're completing
-                        toolExecutionInProgress.set(false);
-                        reactor.core.scheduler.Schedulers.single().schedule(() -> {
-                            sink.complete();
-                        }, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
-                        
-                    } catch (Exception e) {
-                        logger.error("Error parsing tool calls response", e);
-                        // Reset tool execution flag since we're completing with error
-                        toolExecutionInProgress.set(false);
-                        sink.error(e);
+                    // Safely add tool responses to the conversation context
+                    try {
+                        currentMessages.addAll(validResponses); // Add all successfully executed tool responses
+                        effectiveMessages = currentMessages;
+                    } catch (UnsupportedOperationException ex) {
+                        // Handle case where currentMessages is an immutable collection
+                        logger.warn("Detected immutable message collection during tool execution for modelId {}. Creating mutable copy.", modelId);
+                        List<ChatMessage> mutableMessages = new ArrayList<>(currentMessages);
+                        mutableMessages.addAll(validResponses);
+                        // Use the mutable collection for continuing conversation
+                        effectiveMessages = mutableMessages;
+                    }
+
+                    // Make this final for use in lambda expressions
+                    final List<ChatMessage> finalCurrentMessages = effectiveMessages;
+
+                    if (!validResponses.isEmpty()) {
+                        if (!sinkClosed.get()) {
+                             for (ChatMessage toolRespMsg : validResponses) {
+                                 String toolResponseMessageContent = String.format("\\n[Tool %s executed. Result (preview): %s]\\n", 
+                                                                          toolRespMsg.getName(), 
+                                                                          toolRespMsg.getContent() != null ? toolRespMsg.getContent().substring(0, Math.min(100, toolRespMsg.getContent().length())) : "null");
+                                 if (!sinkClosed.get()) {
+                                     sink.next(toolResponseMessageContent);
+                                 } else {
+                                     logger.warn("Sink closed while trying to send tool execution result for modelId: {}", modelId);
+                                     break; 
+                                 }
+                             }
+                        }                        logger.info("Continuing conversation for modelId {} after {} successful tool responses.", modelId, validResponses.size());                        try {
+                            // Always create a fresh mutable copy of currentMessages to avoid potential immutability issues
+                            executeStreamingConversationWithToolsInternal(
+                                new ArrayList<>(finalCurrentMessages), 
+                                modelId, 
+                                sink, 
+                                toolSelection, 
+                                cancellationFlag
+                            );
+                        } catch (UnsupportedOperationException ex) {
+                            logger.warn("UnsupportedOperationException during conversation continuation for modelId {}. Attempting to recover.", modelId);
+                            // This is unlikely to happen since we're already creating a new ArrayList, but just in case
+                            tryCloseSinkWithError(sink, sinkClosed, 
+                                new IllegalStateException("Failed to continue conversation after tool execution: " + ex.getMessage(), ex), 
+                                modelId, cancellationFlag);
+                        }
+                    } else {
+                        logger.warn("No successful tool responses to add for modelId {}. This might happen if all tool calls failed (errors delayed and caught below) or were filtered. Completing stream.", modelId);
+                        tryCloseSinkWithCompletion(sink, sinkClosed, modelId, "No successful tool responses to continue conversation.", cancellationFlag);
                     }
                 },
-                error -> {
-                    logger.error("Error handling tool calls completion", error);
-                    // Reset tool execution flag since we're completing with error
-                    toolExecutionInProgress.set(false);
-                    sink.error(error);
+                error -> { // This catches errors from concatMapDelayError (i.e., from tool executions)
+                    logger.error("Error during sequential execution of tool calls for modelId {}:", modelId, error);
+                    tryCloseSinkWithError(sink, sinkClosed, error, modelId, cancellationFlag);
                 }
             );
     }
-      /**
-     * Executes a single tool call and adds the result to the conversation.
-     * @return true if execution was successful, false if it failed
-     */    private boolean executeToolCallFromNode(JsonNode toolCallNode, 
-                                List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages,
-                                reactor.core.publisher.FluxSink<String> sink) {        try {
-            String toolCallId = toolCallNode.path("id").asText();
-            JsonNode functionNode = toolCallNode.path("function");
-            final String toolName = functionNode.path("name").asText();
-            String argumentsJson = functionNode.path("arguments").asText();
-            
-            sink.next("\n[Executing: " + toolName + "]");
-            logger.info("Executing tool call: {} with ID: {}", toolName, toolCallId);
-            
-            // Parse arguments
-            final Map<String, Object> arguments = new HashMap<>();
-            if (argumentsJson != null && !argumentsJson.trim().isEmpty()) {
-                try {
-                    arguments.putAll(objectMapper.readValue(argumentsJson, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}));
-                } catch (JsonProcessingException e) {
-                    logger.error("Error parsing tool arguments: {}", argumentsJson, e);
-                    sink.next("\n[Error parsing tool arguments: " + e.getMessage() + "]");
-                }
-            }
-            
-            // Send status update for long-running tools
-            sink.next("\n[Tool execution started - this may take some time...]");
-            
-            // Execute the tool via MCP with timeout handling
-            CompletableFuture<Map<String, Object>> toolResultFuture = CompletableFuture.supplyAsync(() -> {
-                try {
-                    return dynamicIntegrationService.executeToolCall(toolName, arguments);
-                } catch (Exception e) {
-                    logger.error("Error executing tool {}: {}", toolName, e.getMessage(), e);
+
+
+    // Updated to include modelId for logging
+    private Mono<ChatMessage> executeToolCallFromNode(
+        Map<String, Object> toolCallToExecute, 
+        List<Map<String, Object>> availableTools, 
+        LlmConfiguration llmConfiguration,
+        String modelId // Added modelId
+    ) {
+        @SuppressWarnings("unchecked")
+        String toolName = (String) ((Map<String, Object>) toolCallToExecute.get("function")).get("name");
+        String toolCallId = (String) toolCallToExecute.get("id");
+        @SuppressWarnings("unchecked")
+        String toolArgs = (String) ((Map<String, Object>) toolCallToExecute.get("function")).get("arguments");
+
+        // Check if the requested tool is actually available/enabled
+        boolean toolAvailableAndEnabled = availableTools != null && availableTools.stream()
+            .anyMatch(t -> {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> functionMap = (Map<String, Object>) t.get("function");
+                return functionMap != null && toolName.equals(functionMap.get("name"));
+            });
+
+        if (!toolAvailableAndEnabled) {
+            logger.warn("Tool '{}' requested by LLM for modelId {} is not in the list of available/enabled tools. Skipping execution.", toolName, modelId);
+            String errorResult = String.format("{\"error\": \"Tool '%s' is not available or not enabled for execution.\"}", toolName);
+            // Return a "tool" role message indicating the error
+            return Mono.just(new ChatMessage("tool", errorResult, toolCallId, toolName));
+        }        logger.info("Executing tool: Name: {}, ID: {}, Args (preview): {} for modelId: {}", toolName, toolCallId, toolArgs.substring(0, Math.min(100, toolArgs.length())), modelId);
+
+        return Mono.fromCallable(() -> {
+            String resultJson;
+            try {
+                // Parse tool arguments from JSON string to Map
+                @SuppressWarnings("unchecked")
+                Map<String, Object> argumentsMap = objectMapper.readValue(toolArgs, Map.class);
+                
+                // Execute the tool via DynamicIntegrationService
+                Map<String, Object> toolResult = dynamicIntegrationService.executeToolCall(toolName, argumentsMap);
+                
+                if (toolResult != null) {
+                    // Tool execution was successful, serialize the result
+                    resultJson = objectMapper.writeValueAsString(toolResult);
+                    logger.info("Tool '{}' (ID: {}) executed successfully for modelId: {}", toolName, toolCallId, modelId);
+                } else {
+                    // Tool execution failed, create error response
+                    logger.error("Tool execution returned null for '{}' (ID: {}) for modelId: {}", toolName, toolCallId, modelId);
                     Map<String, Object> errorResult = new HashMap<>();
-                    errorResult.put("error", e.getMessage());
-                    return errorResult;
+                    errorResult.put("error", "Tool execution failed - no result returned");
+                    errorResult.put("tool_name", toolName);
+                    errorResult.put("tool_call_id", toolCallId);
+                    resultJson = objectMapper.writeValueAsString(errorResult);
                 }
+
+            } catch (Exception e) {
+                logger.error("Error executing tool {} (ID: {}) for modelId {}:", toolName, toolCallId, modelId, e);
+                Map<String, Object> errorResult = new HashMap<>();
+                errorResult.put("error", e.getMessage());
+                errorResult.put("tool_name", toolName);
+                errorResult.put("tool_call_id", toolCallId);
+                resultJson = objectMapper.writeValueAsString(errorResult);
+            }
+            // Create a "tool" role ChatMessage with the result
+            return new ChatMessage("tool", resultJson, toolCallId, toolName);
+        });
+    }
+
+    /**
+     * Retrieves the list of available LLM models from the API endpoint.
+     * <p>
+     * This method queries the OpenAI-compatible API for available models and enhances them with
+     * capability information. It first attempts to fetch models from the API endpoint. If that fails,
+     * it falls back to a default model configuration based on the application properties.
+     * <p>
+     * The method handles various error conditions including:
+     * <ul>
+     *   <li>Invalid or missing API responses</li>
+     *   <li>Models with missing information (like empty ID)</li>
+     *   <li>Network connectivity issues</li>
+     * </ul>
+     * <p>
+     * Each returned model contains:
+     * <ul>
+     *   <li>Model ID - Unique identifier for the model</li>
+     *   <li>Display name - User-friendly name for UI display</li>
+     *   <li>Capability flags - What features the model supports (text, vision, etc.)</li>
+     *   <li>Token limits - Maximum context window size</li>
+     * </ul>
+     *
+     * @return List of ProviderModel objects representing available models with their capabilities
+     */
+    public List<ProviderModel> getAvailableModels() {
+        logger.info("Fetching available models from API endpoint: {}", openAIProperties.getBaseurl());
+        
+        try {
+            // Make API call to fetch models
+            String responseJson = webClient.get()
+                .uri("/models")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
+                .retrieve()
+                .bodyToMono(String.class)
+                .block();
+            
+            if (responseJson == null || responseJson.isEmpty()) {
+                logger.warn("Received empty response from models endpoint");
+                return Collections.emptyList();
+            }
+              // Parse response to extract model data
+            JsonNode rootNode = objectMapper.readTree(responseJson);
+            JsonNode dataNode = rootNode.path("data");
+            
+            List<ProviderModel> models = new ArrayList<>();            // If we have a "data" array (OpenAI format)
+            if (dataNode.isArray()) {
+                for (JsonNode modelNode : dataNode) {
+                    String id = modelNode.path("id").asText();
+                    
+                    // Skip non-chat models and internal models
+                    if (shouldSkipModel(id)) {
+                        continue;
+                    }
+                    
+                    ProviderModel model = createProviderModel(id, modelNode);
+                    models.add(model);
+                }
+            } else if (dataNode.isMissingNode() || dataNode.isNull()) {
+                // Data field is missing or null - test case expects empty list here
+                logger.warn("Data field is missing in API response");
+                return Collections.emptyList();
+            }
+              // Sort models by name
+            models.sort((m1, m2) -> {
+                String name1 = ProviderModelAdapter.getDisplayName(m1);
+                String name2 = ProviderModelAdapter.getDisplayName(m2);
+                return name1 != null && name2 != null ? name1.compareToIgnoreCase(name2) : 0;
             });
             
-            // Wait for the tool execution with status updates for long-running operations
-            Map<String, Object> toolResult = null;
-            boolean isTimeout = false;
-            
-            try {
-                // Send status updates every 5 seconds for long-running tools
-                for (int i = 0; i < 60 && !toolResultFuture.isDone(); i++) { // Up to 5 minutes (60 * 5 seconds)
-                    try {
-                        toolResult = toolResultFuture.get(5, TimeUnit.SECONDS);
-                        break; // If we get here, the future completed successfully
-                    } catch (TimeoutException e) {
-                        // Send updates every 5 seconds
-                        if (i > 0 && i % 2 == 0) { // Every 10 seconds
-                            sink.next("\n[Tool execution still in progress - please wait...]");
-                            logger.info("Tool {} still executing after {} seconds", toolName, i * 5);
-                        }
-                    }
-                }
-                  // If still not done after loop, try one more time with a longer timeout
-                if (toolResult == null) {
-                    try {
-                        toolResult = toolResultFuture.get(10, TimeUnit.SECONDS);
-                    } catch (TimeoutException e) {
-                        // Final timeout - but don't consider this a failure
-                        isTimeout = true;
-                        logger.warn("Tool execution for {} timed out after 5 minutes, but continues in the background", toolName);
-                        
-                        // Don't cancel the future - let it continue running in the background
-                        // toolResultFuture.cancel(true);
-                        
-                        Map<String, Object> timeoutResult = new HashMap<>();
-                        timeoutResult.put("status", "running");
-                        timeoutResult.put("message", "Tool execution is taking longer than the maximum wait time of 5 minutes. The operation continues to run in the background and may complete successfully.");
-                        toolResult = timeoutResult;
-                        
-                        sink.next("\n[Tool execution continues in background beyond maximum wait time]");
-                    }
-                }
-            } catch (InterruptedException | ExecutionException e) {
-                logger.error("Error while waiting for tool execution: {}", e.getMessage(), e);
-                Map<String, Object> errorResult = new HashMap<>();
-                errorResult.put("error", "Error waiting for tool execution: " + e.getMessage());
-                toolResult = errorResult;
-            }                if (toolResult == null) {
-                toolResult = new HashMap<>();
-                if (isTimeout) {
-                    // Provide a more informative message for timeout case
-                    toolResult.put("status", "running");
-                    toolResult.put("message", "The tool execution is taking longer than the maximum wait time of 5 minutes. It continues to run in the background on the server and may complete successfully.");
-                } else {
-                    toolResult.put("error", "Unknown error executing tool - null result");
-                }
-            }
-            
-            // Add assistant message with tool call to conversation
-            com.steffenhebestreit.ai_research.Model.ChatMessage assistantMessage = 
-                new com.steffenhebestreit.ai_research.Model.ChatMessage();
-            assistantMessage.setRole("assistant");
-            assistantMessage.setContent(null); // No text content for tool call message
-            // We add tool call data via tool_calls field in a real implementation
-            messages.add(assistantMessage);
-            
-            // Add tool result as a tool message
-            com.steffenhebestreit.ai_research.Model.ChatMessage toolMessage = 
-                new com.steffenhebestreit.ai_research.Model.ChatMessage();
-            toolMessage.setRole("tool");
-            toolMessage.setToolCallId(toolCallId); // Link this result to the specific tool call
-              String resultContent;
-            boolean toolSuccess = false;            
-            if (toolResult != null) {
-                if (toolResult.containsKey("error")) {
-                    // Extract error details for better LLM feedback
-                    String errorMsg = toolResult.get("error").toString();
-                    sink.next("\n[Tool error: " + errorMsg + "]");
-                    logger.error("Tool execution error: {}", errorMsg);
-                    
-                    // Structure the error message to help LLM learn from it
-                    StringBuilder formattedError = new StringBuilder();
-                    formattedError.append("Error executing tool '").append(toolName).append("': ").append(errorMsg);
-                    
-                    // Parse error for parameter validation issues to provide more helpful feedback
-                    if (errorMsg.contains("Invalid parameters") || errorMsg.contains("is not allowed")) {
-                        formattedError.append("\n\nThis appears to be a parameter validation error. ");
-                        
-                        // Add the arguments that were sent for context
-                        formattedError.append("The arguments provided were: ");
-                        try {
-                            formattedError.append(objectMapper.writeValueAsString(arguments));
-                        } catch (Exception e) {
-                            formattedError.append(arguments.toString());
-                        }
-                        
-                        // Try to extract parameter details from error message
-                        if (toolResult.get("error") instanceof Map) {
-                            @SuppressWarnings("unchecked")
-                            Map<String, Object> errorDetails = (Map<String, Object>) toolResult.get("error");
-                            if (errorDetails.containsKey("data")) {
-                                formattedError.append("\n\nDetails: ").append(errorDetails.get("data"));
-                            }
-                        }
-                        
-                        // Get parameter schema for the tool if possible
-                        formattedError.append("\n\nPlease try again with valid parameters for this tool.");
-                        
-                        // Suggest corrective action based on error message
-                        if (errorMsg.contains("is not allowed")) {
-                            String param = extractParameterNameFromError(errorMsg);
-                            if (param != null) {
-                                formattedError.append("\n\nThe parameter '").append(param)
-                                    .append("' is not valid for this tool. Please remove it and try again.");
-                            }
-                        }
-                    }
-                    
-                    resultContent = formattedError.toString();
-                    
-                    // Consider partial results as partial success
-                    toolSuccess = toolResult.containsKey("result");
-                    
-                    // Add more context to the error message if we have partial results
-                    if (toolSuccess && toolResult.containsKey("result")) {
-                        resultContent += "\n\nPartial results were obtained and may be useful: " + 
-                                         objectMapper.writeValueAsString(toolResult.get("result"));
-                    }
-                } else if (toolResult.containsKey("status") && "running".equals(toolResult.get("status"))) {
-                    // Handle the case of long-running tools
-                    resultContent = toolResult.get("message").toString();
-                    sink.next("\n[Tool execution continues in background]");
-                    logger.info("Tool '{}' execution continues in background beyond the maximum wait time", toolName);
-                    toolSuccess = true; // Consider this a success since the tool is running as expected
-                } else if (toolResult.containsKey("result")) {
-                    resultContent = objectMapper.writeValueAsString(toolResult.get("result"));
-                    sink.next("\n[Tool completed successfully]");
-                    logger.info("Tool executed successfully, result size: {} chars", resultContent.length());
-                    toolSuccess = true;
-                } else {
-                    resultContent = objectMapper.writeValueAsString(toolResult);
-                    sink.next("\n[Tool completed]");
-                    logger.info("Tool completed, result size: {} chars", resultContent.length());
-                    toolSuccess = true;
-                }
-            } else {
-                resultContent = "Tool execution encountered an issue. The server returned no result. This might indicate a server-side error.";
-                sink.next("\n[Tool execution issue: no result returned]");
-                logger.error("Tool execution returned null result for tool: {}", toolName);
-                toolSuccess = false;
-            }
-            
-            toolMessage.setContent(resultContent);
-            messages.add(toolMessage);
-            
-            logger.info("Added tool result to conversation for tool '{}'. Message count now: {}", toolName, messages.size());
-            return toolSuccess;
-              } catch (Exception e) {
-            logger.error("Error executing tool call", e);
-            sink.next("\n[Tool execution error: " + e.getMessage() + "]\n");
-            
-            // Extract tool information from node if possible for better error reporting
-            String toolName = "unknown-tool";
-            String toolId = "unknown-id";
-            try {
-                toolName = toolCallNode.path("function").path("name").asText("unknown-tool");
-                toolId = toolCallNode.path("id").asText("unknown-id");
-            } catch (Exception ex) {
-                logger.error("Error extracting tool info for error message", ex);
-            }
-            
-            // Add a tool message with the error for the LLM to understand what happened
-            com.steffenhebestreit.ai_research.Model.ChatMessage errorMessage = 
-                new com.steffenhebestreit.ai_research.Model.ChatMessage();
-            errorMessage.setRole("tool");
-            errorMessage.setToolCallId(toolId); // Link the error to the specific tool call ID
-            
-            // Create a more informative error message
-            String errorContent = "Error executing tool '" + toolName + "' (ID: " + toolId + "): " + e.getMessage();
-            
-            // Add root cause if available
-            if (e.getCause() != null) {
-                errorContent += "\nRoot cause: " + e.getCause().getMessage();
-            }
-              // Add a user-friendly message to help understand the impact
-            errorContent += "\n\nThe system encountered an error while executing this tool. " +
-                           "Other tools may still have succeeded. Please consider the partial " +
-                           "information available and adjust your approach accordingly.";
-            
-            // Add guidance for retrying with corrected parameters
-            errorContent += "\n\nPlease try again with corrected parameters. Make sure that:\n" +
-                           "1. You're only using parameters defined in the tool's schema\n" +
-                           "2. Parameter types match what the tool expects\n" +
-                           "3. Required parameters are provided\n" +
-                           "4. Parameter values are within expected ranges or formats";
-            
-            errorMessage.setContent(errorContent);
-            messages.add(errorMessage);
-            
-            return false;
+            logger.info("Retrieved {} models from API", models.size());
+            return models;
+        } catch (Exception e) {
+            logger.error("Error fetching available models", e);
+            return Collections.emptyList();
         }
     }
     
     /**
-     * Reactive version to get complete response including tool calls.
+     * Determines if a model should be skipped based on its ID.
+     * 
+     * @param id The model ID to check
+     * @return True if the model should be skipped, false otherwise
      */
-    private reactor.core.publisher.Mono<String> getChatCompletionForToolCallsReactive(List<com.steffenhebestreit.ai_research.Model.ChatMessage> conversationMessages, String modelId) {
-        List<Map<String, Object>> messagesForLlm = new ArrayList<>();
-        for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : conversationMessages) {
-            Map<String, Object> llmMessage = new HashMap<>();
-            String role = msg.getRole();
-            if ("agent".equalsIgnoreCase(role)) {
-                role = "assistant";
+    private boolean shouldSkipModel(String id) {
+        // Skip if ID is empty
+        if (id == null || id.isEmpty()) {
+            return true;
+        }
+        
+        // Skip internal/hidden models
+        if (id.startsWith("internal-") || id.contains("-internal")) {
+            return true;
+        }
+        
+        // Skip embedding models (not chat models)
+        if (id.contains("embedding") || id.contains("search") || id.endsWith("-e")) {
+            return true;
+        }
+        
+        // Skip moderation models
+        if (id.contains("moderation")) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+ * Creates a ProviderModel object from model data.
+ * 
+ * @param id The model ID
+ * @param modelNode The JSON node containing model data
+ * @return A ProviderModel object with appropriate metadata
+ */
+private ProviderModel createProviderModel(String id, JsonNode modelNode) {
+    ProviderModel model = new ProviderModel();
+    model.setId(id);
+    
+    // Set provider name (extract from ID or use default)
+    String provider = determineProviderFromId(id);
+    ProviderModelAdapter.setProvider(model, provider);
+    
+    // Check for capabilities in LlmCapabilityService
+    LlmConfiguration llmConfig = llmCapabilityService.getLlmConfiguration(id);
+    
+    if (llmConfig != null) {
+        // Use name from configuration if available
+        String configName = llmConfig.getName();
+        if (configName != null && !configName.isEmpty()) {
+            ProviderModelAdapter.setDisplayName(model, configName);
+        } else {
+            // Set display name (use id if not available)
+            String displayName = modelNode.path("name").asText(null);
+            if (displayName == null || displayName.isEmpty()) {
+                displayName = getPrettyModelName(id);
             }
-            llmMessage.put("role", role);
-            llmMessage.put("content", msg.getContent());
-            messagesForLlm.add(llmMessage);
+            ProviderModelAdapter.setDisplayName(model, displayName);
+        }
+        
+        // Use capabilities from configuration
+        ProviderModelAdapter.setTokenLimit(model, LlmConfigurationAdapter.getMaxTokens(llmConfig));
+        ProviderModelAdapter.setSupportsText(model, true); // Assume all models support text
+        ProviderModelAdapter.setSupportsImage(model, llmConfig.isSupportsImage());
+        ProviderModelAdapter.setSupportsPdf(model, llmConfig.isSupportsPdf());
+        ProviderModelAdapter.setSupportsJson(model, LlmConfigurationAdapter.isSupportsJson(llmConfig));
+        ProviderModelAdapter.setSupportsTools(model, LlmConfigurationAdapter.isSupportsTools(llmConfig));
+        
+        // Set description and capabilities
+        StringBuilder description = new StringBuilder();
+        if (llmConfig.getDescription() != null && !llmConfig.getDescription().isEmpty()) {
+            description.append(llmConfig.getDescription());
+        }
+        if (llmConfig.getNotes() != null && !llmConfig.getNotes().isEmpty()) {
+            if (description.length() > 0) {
+                description.append(" ");
+            }
+            description.append(llmConfig.getNotes());
+        }
+        model.setDescription(description.toString());
+        model.setCapabilities("(Configured)");
+    } else {
+        // Set display name (use id if not available)
+        String displayName = modelNode.path("name").asText(null);
+        if (displayName == null || displayName.isEmpty()) {
+            displayName = getPrettyModelName(id);
+        }
+        ProviderModelAdapter.setDisplayName(model, displayName);
+        
+        // Apply fallback values
+        ProviderModelAdapter.setTokenLimit(model, 4096); // Conservative default
+        ProviderModelAdapter.setSupportsText(model, true);
+        ProviderModelAdapter.setSupportsImage(model, detectVisionCapability(id));
+        ProviderModelAdapter.setSupportsPdf(model, detectVisionCapability(id)); // Assume PDF support matches image
+        ProviderModelAdapter.setSupportsJson(model, true); // Most modern models support JSON
+        ProviderModelAdapter.setSupportsTools(model, detectToolCapability(id));
+        
+        // Set fallback description and capabilities
+        model.setDescription("Basic fallback configuration for " + displayName);
+        model.setCapabilities("(Fallback)");
+    }
+    
+    return model;
+}
+    
+    /**
+     * Creates a human-readable model name from a model ID.
+     * 
+     * @param id The model ID
+     * @return A formatted display name
+     */
+    private String getPrettyModelName(String id) {
+        // Remove provider prefix if present
+        String name = id;
+        if (name.contains(":")) {
+            name = name.substring(name.indexOf(":") + 1);
+        }
+        
+        // Replace hyphens with spaces and capitalize words
+        StringBuilder prettyName = new StringBuilder();
+        boolean capitalizeNext = true;
+        
+        for (char c : name.toCharArray()) {
+            if (c == '-' || c == '_') {
+                prettyName.append(' ');
+                capitalizeNext = true;
+            } else {
+                if (capitalizeNext) {
+                    prettyName.append(Character.toUpperCase(c));
+                    capitalizeNext = false;
+                } else {
+                    prettyName.append(c);
+                }
+            }
+        }
+        
+        return prettyName.toString();
+    }
+    
+    /**
+     * Determines the provider name from a model ID.
+     * 
+     * @param id The model ID
+     * @return The provider name
+     */    private String determineProviderFromId(String id) {
+        if (id.startsWith("gpt-") || id.startsWith("dall-e")) {
+            return "openai";
+        } else if (id.startsWith("anthropic") || id.startsWith("claude")) {
+            return "anthropic";
+        } else if (id.startsWith("mistral") || id.contains("mistral")) {
+            return "mistral";
+        } else if (id.startsWith("gemini") || id.contains("gemini")) {
+            return "google";
+        } else if (id.startsWith("llama") || id.contains("llama")) {
+            return "meta";
+        } else if (id.contains("mixtral")) {
+            return "mistral";
+        } else if (id.startsWith("glm") || id.contains("chatglm")) {
+            return "thudm";
+        } else {
+            // Check for provider prefixes
+            if (id.contains(":")) {
+                return id.substring(0, id.indexOf(":")).toLowerCase();
+            }
+            
+            return "custom-provider";
+        }
+    }
+    
+    /**
+     * Detects if a model likely supports vision capabilities based on its ID.
+     * 
+     * @param id The model ID
+     * @return True if the model likely supports vision, false otherwise
+     */
+    private boolean detectVisionCapability(String id) {
+        String lowerCaseId = id.toLowerCase();
+        
+        // Known vision-capable models
+        return lowerCaseId.contains("vision") || 
+           lowerCaseId.contains("-v") || 
+           lowerCaseId.equals("gpt-4-turbo") || 
+           lowerCaseId.contains("gpt-4o") || 
+           lowerCaseId.equals("claude-3-opus") || 
+           lowerCaseId.equals("claude-3-sonnet") || 
+           lowerCaseId.equals("claude-3-haiku") || 
+           lowerCaseId.contains("gemini-pro-vision") || 
+           lowerCaseId.contains("gemini-1.5");
+    }
+      /**
+     * Detects if a model likely supports tool calling based on its ID.
+     * 
+     * @param id The model ID
+     * @return True if the model likely supports tools, false otherwise
+     */
+    private boolean detectToolCapability(String id) {
+        String lowerCaseId = id.toLowerCase();
+        
+        // Models known to not support function/tool calling
+        if (lowerCaseId.contains("instruct") || 
+            lowerCaseId.contains("davinci") || 
+            lowerCaseId.contains("babbage") || 
+            lowerCaseId.contains("curie") || 
+            lowerCaseId.contains("ada")) {
+            return false;
+        }
+        
+        // Return true by default for unknown models and those known to support function/tool calling
+        // This matches the test expectation in testGetAvailableModels_FallbackLogic
+        return true;
+    }
+
+    // Convenience method for streaming with tool execution using the default model
+    public Flux<String> getChatCompletionStreamWithToolExecution(List<ChatMessage> messages) {
+        return getChatCompletionStreamWithToolExecution(messages, openAIProperties.getModel());
+    }
+
+    /**
+     * Gets a streaming completion from the LLM with tool execution capability.
+     * <p>
+     * This method processes a list of chat messages and returns a reactive stream
+     * of response chunks with support for tool calls. The method handles parsing
+     * of tool calls from the stream and includes them in the response format.
+     *
+     * @param messages The list of chat messages to process
+     * @param modelId The ID of the LLM model to use
+     * @return A Flux of response chunks with tool call information
+     */
+    public Flux<String> getChatCompletionStreamWithToolExecution(List<ChatMessage> messages, String modelId) {
+        return getChatCompletionStreamWithToolExecution(messages, modelId, null);
+    }
+    /**
+     * Gets a streaming completion from the LLM with tool execution capability and tool selection.
+     * <p>
+     * This method processes a list of chat messages and returns a reactive stream
+     * of response chunks with support for tool calls. It allows specifying which tools
+     * should be enabled for the request.
+     *
+     * @param messages The list of chat messages to process
+     * @param modelId The ID of the LLM model to use
+     * @param toolSelection Optional configuration for tool selection/filtering
+     * @return A Flux of response chunks with tool call information
+     */
+    public Flux<String> getChatCompletionStreamWithToolExecution(
+            List<ChatMessage> messages, 
+            String modelId,
+            ToolSelectionRequest toolSelection) {
+        
+        AtomicBoolean cancellationFlag = new AtomicBoolean(false);
+        
+        return Flux.create(sink -> {
+            executeStreamingConversationWithToolsInternal(messages, modelId, sink, toolSelection, cancellationFlag);
+        });
+    }
+
+    /**
+     * Gets a completion from the LLM for a given prompt synchronously.
+     * <p>
+     * This method sends a simple text prompt to the LLM and returns the complete response
+     * as a single string. It uses the default model specified in the configuration.
+     * <p>
+     * This is a convenience method for simple, non-streaming text completions without
+     * conversation history or additional options.
+     *
+     * @param prompt The text prompt to send to the LLM
+     * @return The LLM's response as text
+     */
+    /* Method commented out due to duplicate definition with getChatCompletion(String message)
+    public String getChatCompletion(String prompt) {
+        // Create a simple user message with the prompt
+        List<ChatMessage> messages = new ArrayList<>();
+        ChatMessage userMessage = new ChatMessage("user", prompt);
+        messages.add(userMessage);
+        
+        // Use the default model from configuration
+        return getChatCompletion(messages, openAIProperties.getModel());
+    }
+    */
+    
+    /**
+     * Gets a completion from the LLM for a conversation history synchronously.
+     * <p>
+     * This method processes a list of chat messages and returns the complete response
+     * as a single string. It uses the default model specified in the configuration.
+     *
+     * @param messages The list of chat messages representing the conversation history
+     * @return The LLM's response as text
+     */
+    public String getChatCompletion(List<ChatMessage> messages) {
+        return getChatCompletion(messages, openAIProperties.getModel());
+    }
+
+    /**
+     * Gets a completion from the LLM for a conversation history with a specified model.
+     * <p>
+     * This method processes a list of chat messages using the specified LLM model and
+     * returns the complete response as a single string.
+     *
+     * @param messages The list of chat messages representing the conversation history
+     * @param modelId The ID of the LLM model to use
+     * @return The LLM's response as text
+     */
+    public String getChatCompletion(List<ChatMessage> messages, String modelId) {
+        logger.info("Getting completion for model: {}", modelId);
+        
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messages);
+        
+        if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && messages.isEmpty())) {
+            logger.warn("Cannot send an effectively empty message list to LLM.");
+            throw new IllegalArgumentException("Cannot send an effectively empty message list to LLM.");
         }
 
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", modelId);
         requestBody.put("messages", messagesForLlm);
-        requestBody.put("stream", false);
         
-        // Add MCP tools
+        // Add discovered MCP tools to request when available
         List<Map<String, Object>> mcpTools = dynamicIntegrationService.getDiscoveredMcpTools();
         if (mcpTools != null && !mcpTools.isEmpty()) {
-            List<Map<String, Object>> formattedTools = convertMcpToolsToOpenAIFormat(mcpTools);
-            requestBody.put("tools", formattedTools);
+            requestBody.put("tools", convertMcpToolsToOpenAIFormat(mcpTools));
         }
 
-        String path = "/chat/completions";
-        
-        return webClient.post()
-                .uri(path)
+        try {
+            // Make the API call
+            String responseJson = webClient.post()
+                               .uri("/chat/completions")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(requestBody)
                 .retrieve()
                 .bodyToMono(String.class)
-                .doOnError(e -> logger.error("Error making reactive non-streaming completion request", e));
+                .block();
+            
+            // Parse the response to extract the generated text
+            JsonNode responseNode = objectMapper.readTree(responseJson);
+            String generatedText = responseNode
+                .path("choices")
+                .path(0)
+                .path("message")
+                .path("content")
+                .asText();
+            
+            return generatedText;
+               } catch (Exception e) {
+            logger.error("Error getting chat completion", e);
+            return "Error processing request: " + e.getMessage();
+        }
     }
-      /**
-     * Continues the conversation after tool execution within the same reactive context.
-     */    private void continueConversationAfterTools(
-        List<com.steffenhebestreit.ai_research.Model.ChatMessage> messages, 
-        String modelId, 
-        reactor.core.publisher.FluxSink<String> sink,
-        java.util.concurrent.atomic.AtomicBoolean toolExecutionInProgress) {
+
+    /**
+     * Gets a non-streaming text completion from the LLM for the given message.
+     * <p>
+     * This method sends a single user message to the LLM and returns the complete response
+     * as a string. It's a simple, synchronous interface for basic text generation without
+     * the complexity of managing conversation history or streaming responses.
+     * <p>
+     * This is useful for:
+     * <ul>
+     *   <li>Simple, one-off queries that don't require context</li>
+     *   <li>System health checks and model capability testing</li>
+     *   <li>Text generation where the complete response is needed at once</li>
+         * </ul>
+     * 
+     * @param message The text message to send to the LLM
+     * @return The complete text response from the LLM
+     */
+    public String getChatCompletion(String message) {
+        return getChatCompletion(message, openAIProperties.getModel());
+    }
+
+    /**
+     * Gets a non-streaming text completion from the LLM for the given message using a specific model.
+     * <p>
+     * This method allows specifying which LLM model to use for the completion,
+     * providing more control over the generation process.
+     * 
+     * @param message The text message to send to the LLM
+     * @param modelId The ID of the model to use for generating the completion
+     * @return The complete text response from the LLM
+     */
+    public String getChatCompletion(String message, String modelId) {
+        logger.info("Getting chat completion with model: {}", modelId);
         
-        // Build messages for LLM including the tool results
-        // IMPORTANT: Start with system message by using prepareMessagesForLlm for system message only
-        List<Map<String, Object>> messagesForLlm = new ArrayList<>();
+        List<ChatMessage> messages = new ArrayList<>();
         
-        // Add system message first (like prepareMessagesForLlm does)
-        String systemRole = openAIProperties.getSystemRole();
-        if (systemRole != null && !systemRole.isEmpty()) {
-            Map<String, Object> systemMessageMap = new HashMap<>();
-            systemMessageMap.put("role", "system");
-            String timeAppendedSystemRole = systemRole + " Current time: " + java.time.Instant.now().toString() + ".";
-            systemMessageMap.put("content", timeAppendedSystemRole);
-            messagesForLlm.add(systemMessageMap);
-            logger.debug("Added system message to continuation request: {}", 
-                timeAppendedSystemRole.substring(0, Math.min(100, timeAppendedSystemRole.length())) + "...");
-        } else {
-            logger.warn("WARNING: System role is null or empty in continuation request! No system message will be sent to LLM!");
+        // Add system message if available
+        if (openAIProperties.getSystemRole() != null && !openAIProperties.getSystemRole().isEmpty()) {
+            messages.add(new ChatMessage("system", "text/plain", openAIProperties.getSystemRole()));
         }
         
-        // Now add all conversation messages including tool results
-        for (com.steffenhebestreit.ai_research.Model.ChatMessage msg : messages) {
-            Map<String, Object> llmMessage = new HashMap<>();
-            String role = msg.getRole();
-            if ("agent".equalsIgnoreCase(role)) {
-                role = "assistant";
-            }
-            llmMessage.put("role", role);
-            
-            // Handle content - ensure it's not null and reasonable
-            String content = msg.getContent();
-            if (content == null) {
-                if ("assistant".equals(role)) {
-                    // Skip assistant messages with null content as they likely had tool calls
-                    // that we can't properly represent in this simplified format
-                    logger.debug("Skipping assistant message with null content");
-                    continue;
-                } else {
-                    content = "";
-                }
-            }
-            
-            // Limit content size for tool messages to prevent overwhelming the LLM
-            if ("tool".equals(role) && content.length() > 5000) {
-                content = content.substring(0, 5000) + "... [content truncated for length]";
-                logger.debug("Truncated tool result content from {} to 5000 chars", content.length());
-            }
-            
-            llmMessage.put("content", content);
-            
-            // Add tool_call_id for tool messages if available
-            if ("tool".equals(role) && msg.getToolCallId() != null) {
-                llmMessage.put("tool_call_id", msg.getToolCallId());
-                logger.debug("Added tool_call_id to message: {}", msg.getToolCallId());
-            }
-            
-            messagesForLlm.add(llmMessage);
-        }
+        // Add user message
+        messages.add(new ChatMessage("user", "text/plain", message));
         
-        logger.info("Built {} messages for continuation request (after filtering)", messagesForLlm.size());
-        
-        // Debug log the message structure
-        if (logger.isDebugEnabled()) {
-            for (int i = 0; i < messagesForLlm.size(); i++) {
-                Map<String, Object> msg = messagesForLlm.get(i);
-                String content = (String) msg.get("content");
-                int contentLength = content != null ? content.length() : 0;
-                logger.debug("Continuation message {}: role={}, content_length={}, tool_call_id={}", 
-                    i, msg.get("role"), contentLength, msg.get("tool_call_id"));
-            }
-        }
-        
-        // Ensure we have valid messages for continuation
-        if (messagesForLlm.isEmpty()) {
-            logger.warn("No valid messages for continuation request after filtering. Completing stream.");
-            sink.next("\n[Tool execution completed successfully]");
-            sink.complete();
-            return;
-        }        Map<String, Object> requestBody = new HashMap<>();
+        // Prepare the request body
+        Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", modelId);
-        requestBody.put("messages", messagesForLlm);
-        requestBody.put("stream", true);
-        
-        // DO NOT add tools to continuation requests to prevent recursive tool calls
-        // Tools should only be available in the initial request, not in continuations
-        logger.info("Continuation request without tools to prevent recursive tool execution");
-
-        String path = "/chat/completions";
-
-        // Track if stream has been completed to prevent multiple completion calls
-        final java.util.concurrent.atomic.AtomicBoolean streamCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
-        // Track the subscription so we can cancel it if needed
-        final java.util.concurrent.atomic.AtomicReference<reactor.core.Disposable> subscriptionRef = new java.util.concurrent.atomic.AtomicReference<>();
-        
-        // Make a new streaming request for the continuation and properly connect it to the sink
-        reactor.core.Disposable subscription = webClient.post()
-                .uri(path)
+        requestBody.put("messages", prepareMessagesForLlm(messages));
+    
+        try {
+            // Make the API call
+            String responseJson = webClient.post()
+                .uri("/chat/completions")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + openAIProperties.getKey())
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(requestBody)
                 .retrieve()
-                .bodyToFlux(String.class)
-                .doOnNext(rawEvent -> logger.debug("Raw continuation event: {}", rawEvent))
-                .map(String::trim)
-                .filter(trimmedEvent -> !"[DONE]".equalsIgnoreCase(trimmedEvent))
-                .retryWhen(reactor.util.retry.Retry.backoff(2, java.time.Duration.ofSeconds(1))
-                        .doBeforeRetry(retrySignal -> 
-                            logger.warn("Retrying continuation request (attempt {}): {}", 
-                                retrySignal.totalRetries() + 1, retrySignal.failure().getMessage())))
-                // Add delay before completion to ensure content is fully transmitted
-                .doOnComplete(() -> {
-                    logger.info("CONTINUATION: Raw stream completed, scheduling sink completion after delay");
-                    // Use a scheduler to add a small delay before completing
-                    reactor.core.scheduler.Schedulers.single().schedule(() -> {
-                        if (streamCompleted.compareAndSet(false, true)) {
-                            logger.info("CONTINUATION: Completing sink after stream completion delay");
-                            // Reset tool execution flag only when actually completing the sink
-                            toolExecutionInProgress.set(false);
-                            sink.complete();
-                        }
-                    }, 100, java.util.concurrent.TimeUnit.MILLISECONDS);
-                })
-                .subscribe(
-                    jsonChunk -> {
-                        try {
-                            if ("[DONE]".equalsIgnoreCase(jsonChunk.trim())) {
-                                logger.info("CONTINUATION: Received [DONE] marker");
-                                return;
-                            }
-                            
-                            logger.debug("CONTINUATION: Processing chunk: {}", jsonChunk);
-                            
-                            JsonNode rootNode = objectMapper.readTree(jsonChunk);
-                            JsonNode choicesNode = rootNode.path("choices");
-                            if (choicesNode.isArray() && !choicesNode.isEmpty()) {
-                                JsonNode firstChoice = choicesNode.get(0);
-                                JsonNode deltaNode = firstChoice.path("delta");
-                                JsonNode finishReasonNode = firstChoice.path("finish_reason");
-                                
-                                logger.debug("CONTINUATION: Delta: {}, Finish reason: {}", 
-                                    deltaNode.toString(), 
-                                    finishReasonNode.isTextual() ? finishReasonNode.asText() : "null");
-                                
-                                // Check for tool calls in delta (potential recursive tool calls)
-                                JsonNode toolCallsNode = deltaNode.path("tool_calls");
-                                if (toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
-                                    // Process tool call data
-                                    logger.info("CONTINUATION: Found recursive tool calls");
-                                    processToolCallDelta(toolCallsNode, sink);
-                                } else {
-                                    // Regular content - this is what we want to stream to frontend
-                                    JsonNode contentNode = deltaNode.path("content");
-                                    if (contentNode.isTextual()) {
-                                        String content = contentNode.asText();
-                                        logger.info("CONTINUATION: Emitting content to frontend: '{}'", content);
-                                        sink.next(content);
-                                    } else {
-                                        // Log when there's no content in the delta
-                                        logger.debug("CONTINUATION: Delta has no content node. Delta: {}", deltaNode);
-                                    }
-                                }
-                                
-                                // Check finish reason - but don't complete immediately
-                                if (finishReasonNode.isTextual()) {
-                                    String finishReason = finishReasonNode.asText();
-                                    logger.info("CONTINUATION: Stream finished with reason: '{}'", finishReason);
-                                      if ("tool_calls".equals(finishReason)) {
-                                        // Handle tool calls - but only if no tool execution is currently in progress
-                                        logger.info("CONTINUATION: Tool calls detected in continuation stream");
-                                        
-                                        // Count existing tool calls to prevent infinite loops
-                                        long toolCallCount = messages.stream()
-                                            .filter(msg -> "tool".equals(msg.getRole()))
-                                            .count();
-                                              if (toolCallCount >= 5) {
-                                            logger.warn("CONTINUATION: Maximum tool call limit reached ({}), preventing potential infinite loop", toolCallCount);
-                                            if (streamCompleted.compareAndSet(false, true)) {
-                                                reactor.core.Disposable currentSub = subscriptionRef.get();
-                                                if (currentSub != null && !currentSub.isDisposed()) {
-                                                    currentSub.dispose();
-                                                }
-                                                sink.next("\n[Maximum tool call limit reached. Completing conversation.]\n");
-                                                sink.complete();
-                                            }
-                                            return;
-                                        }
-                                        
-                                        // Only allow tool execution if none is currently in progress
-                                        if (toolExecutionInProgress.compareAndSet(false, true)) {
-                                            logger.info("CONTINUATION: Starting tool execution ({}/5 tool calls used)", toolCallCount + 1);
-                                            if (streamCompleted.compareAndSet(false, true)) {
-                                                // Cancel the current subscription to prevent completion handlers from running
-                                                reactor.core.Disposable currentSub = subscriptionRef.get();
-                                                if (currentSub != null && !currentSub.isDisposed()) {
-                                                    currentSub.dispose();
-                                                }
-                                                handleToolCallsCompletion(messages, modelId, sink, toolExecutionInProgress);
-                                            }
-                                        } else {
-                                            // Tool execution already in progress - ignore this tool call request
-                                            logger.warn("CONTINUATION: Tool execution already in progress, ignoring duplicate tool call request");
-                                            return;
-                                        }
-                                        return;
-                                    }
-                                    // For normal completion, let the doOnComplete handler manage it with delay
-                                } else {
-                                    logger.debug("CONTINUATION: No finish reason in this chunk");
-                                }
-                            }
-                        } catch (JsonProcessingException e) {
-                            logger.error("Error parsing continuation JSON chunk: '{}'", jsonChunk, e);
-                            if (streamCompleted.compareAndSet(false, true)) {
-                                sink.error(e);
-                            }
-                        } catch (Exception e) {
-                            logger.error("Unexpected error processing continuation chunk: '{}'", jsonChunk, e);                            if (streamCompleted.compareAndSet(false, true)) {
-                                sink.error(e);
-                            }
-                        }
-                    },
-                    error -> {
-                        logger.error("Error in continuation streaming response after retries", error);
-                        
-                        if (streamCompleted.compareAndSet(false, true)) {
-                            // Reset tool execution flag since we're completing with error
-                            toolExecutionInProgress.set(false);
-                            
-                            // Provide a fallback response instead of failing completely
-                            sink.next("\n\n[Tool execution completed successfully, but continuation response failed. ");
-                            sink.next("Tool results were processed. ");
-                            sink.next("Connection issue with LLM server: " + error.getMessage() + "]");
-                            sink.complete();
-                        }
-                    }
-                );
-        
-        // Store the subscription reference so we can cancel it if needed
-        subscriptionRef.set(subscription);
-    }
-    
-    /**
-     * Extracts parameter name from error messages related to invalid parameters.
+                .bodyToMono(String.class)
+                .block();
+            
+            // Parse the response to extract the generated text
+            JsonNode responseNode = objectMapper.readTree(responseJson);
+            String generatedText = responseNode
+                .path("choices")
+                .path(0)
+                .path("message")
+                .path("content")
+                .asText();
+            
+            return generatedText;
+        } catch (Exception e) {
+            logger.error("Error getting chat completion", e);
+            return "Error: " + e.getMessage();
+        }    }    /**
+     * Converts multimodal content to a string representation for storage in ChatMessage.
+     * <p>
+     * This helper method converts a complex multimodal content object (which is typically
+     * an array of maps containing text and image data) into a JSON string representation.
+     * This is necessary because ChatMessage.content only accepts String values, but
+     * multimodal content is structured as Object[] with maps.
+     * <p>
+     * The conversion preserves the structure of the multimodal content while making it
+     * compatible with the ChatMessage model's string-only content field.
      * 
-     * @param errorMessage The error message to parse
-     * @return The parameter name if it can be extracted, null otherwise
-     */
-    private String extractParameterNameFromError(String errorMessage) {
-        if (errorMessage == null || errorMessage.isEmpty()) {
+     * @param multimodalContent The complex multimodal content object to convert
+     * @return A JSON string representation of the multimodal content
+     */    public String convertMultimodalContentToString(Object multimodalContent) {
+        if (multimodalContent == null) {
             return null;
         }
         
-        // Try to extract parameter name from common error patterns
         try {
-            // Pattern: "X is not allowed" - commonly used by JSON Schema validation errors
-            if (errorMessage.contains("is not allowed")) {
-                int start = errorMessage.indexOf("\"");
-                int end = errorMessage.lastIndexOf("\"");
-                if (start >= 0 && end > start) {
-                    return errorMessage.substring(start + 1, end);
+            // Use the ObjectMapper to convert the multimodal content to a JSON string
+            return objectMapper.writeValueAsString(multimodalContent);
+        } catch (Exception e) {
+            logger.error("Error converting multimodal content to JSON string: {}", e.getMessage());
+            
+            // Better fallback handling for different types
+            if (multimodalContent instanceof Object[]) {
+                Object[] contentArray = (Object[]) multimodalContent;
+                try {
+                    // Try to convert array elements individually
+                    List<Object> contentList = Arrays.asList(contentArray);
+                    return objectMapper.writeValueAsString(contentList);
+                } catch (Exception e2) {
+                    logger.error("Failed to convert multimodal content array to JSON: {}", e2.getMessage());
+                    return "[Multimodal content - conversion failed]";
+                }
+            } else if (multimodalContent instanceof String) {
+                return (String) multimodalContent;
+            } else {
+                logger.warn("Using toString() fallback for multimodal content of type: {}", multimodalContent.getClass().getSimpleName());
+                return "[Multimodal content of type: " + multimodalContent.getClass().getSimpleName() + "]";
+            }
+        }
+    }
+
+    /**
+     * Extracts only text content from multimodal content, stripping out binary data.
+     * This is used for storing a readable representation in the database and for history.
+     */
+    private String extractTextFromMultimodalContent(Object multimodalContent) {
+        if (multimodalContent == null) {
+            return null;
+        }
+        
+        try {
+            if (multimodalContent instanceof Object[]) {
+                Object[] contentArray = (Object[]) multimodalContent;
+                StringBuilder textBuilder = new StringBuilder();
+                
+                for (Object item : contentArray) {
+                    if (item instanceof Map) {
+                        Map<?, ?> itemMap = (Map<?, ?>) item;
+                        String type = (String) itemMap.get("type");
+                        
+                        if ("text".equals(type)) {
+                            Object text = itemMap.get("text");
+                            if (text != null) {
+                                if (textBuilder.length() > 0) {
+                                    textBuilder.append(" ");
+                                }
+                                textBuilder.append(text.toString());
+                            }
+                        } else if ("image_url".equals(type)) {
+                            // Replace image with a placeholder
+                            if (textBuilder.length() > 0) {
+                                textBuilder.append(" ");
+                            }
+                            textBuilder.append("[Image content omitted from history]");
+                        }
+                    }
                 }
                 
-                // Try without quotes
-                start = errorMessage.indexOf("[");
-                end = errorMessage.indexOf("]");
-                if (start >= 0 && end > start) {
-                    return errorMessage.substring(start + 1, end);
+                return textBuilder.toString();
+            } else if (multimodalContent instanceof Map) {
+                Map<?, ?> contentMap = (Map<?, ?>) multimodalContent;
+                if (contentMap.containsKey("text")) {
+                    return contentMap.get("text").toString();
                 }
             }
             
-            // Pattern: "Missing required parameter: X"
-            if (errorMessage.contains("Missing required parameter")) {
-                int colonIndex = errorMessage.indexOf(":");
-                if (colonIndex >= 0 && colonIndex < errorMessage.length() - 1) {
-                    return errorMessage.substring(colonIndex + 1).trim();
+            // Fallback for any other structure
+            return "[Multimodal content: " + multimodalContent.getClass().getSimpleName() + "]";
+        } catch (Exception e) {
+            logger.warn("Error extracting text from multimodal content: {}", e.getMessage());
+            return "[Multimodal content extraction failed]";
+        }
+    }
+    
+    /**
+     * Creates a token-efficient version of multimodal content for history storage.
+     * This strips out large binary content (like base64-encoded images) while preserving text.
+     */
+    public Object createHistoryFriendlyMultimodalContent(Object multimodalContent) {
+        if (multimodalContent == null) {
+            return null;
+        }
+        
+        try {
+            if (multimodalContent instanceof Object[]) {
+                Object[] contentArray = (Object[]) multimodalContent;
+                List<Object> historyContent = new ArrayList<>();
+                
+                for (Object item : contentArray) {
+                    if (item instanceof Map) {
+                        Map<?, ?> itemMap = (Map<?, ?>) item;
+                        String type = (String) itemMap.get("type");
+                        
+                        if ("text".equals(type)) {
+                            // Keep text content as-is
+                            historyContent.add(item);
+                        } else if ("image_url".equals(type)) {
+                            // Replace image content with a placeholder
+                            Map<String, Object> placeholder = new HashMap<>();
+                            placeholder.put("type", "text");
+                            placeholder.put("text", "[Image content omitted from history to save tokens]");
+                            historyContent.add(placeholder);
+                        }
+                    }
                 }
+                
+                return historyContent.toArray();
+            } else if (multimodalContent instanceof List) {
+                List<?> contentList = (List<?>) multimodalContent;
+                List<Object> historyContent = new ArrayList<>();
+                
+                for (Object item : contentList) {
+                    if (item instanceof Map) {
+                        Map<?, ?> itemMap = (Map<?, ?>) item;
+                        String type = (String) itemMap.get("type");
+                        
+                        if ("text".equals(type)) {
+                            historyContent.add(item);
+                        } else if ("image_url".equals(type)) {
+                            Map<String, Object> placeholder = new HashMap<>();
+                            placeholder.put("type", "text");
+                            placeholder.put("text", "[Image content omitted from history to save tokens]");
+                            historyContent.add(placeholder);
+                        }
+                    }
+                }
+                
+                return historyContent;
             }
             
-            // Pattern from JSON-RPC errors: "Invalid parameters for tool X, data={details=[...]}""
-            if (errorMessage.contains("Invalid parameters for tool") && errorMessage.contains("details=")) {
-                int detailsStart = errorMessage.indexOf("details=");
-                if (detailsStart >= 0) {
-                    String details = errorMessage.substring(detailsStart + 8); // "details=".length()
-                    
-                    // Extract parameter name from JSON-like structure [{"param":"X"}] or ["X is not allowed"]
-                    int quotedParamStart = details.indexOf("\"");
-                    if (quotedParamStart >= 0) {
-                        int quotedParamEnd = details.indexOf("\"", quotedParamStart + 1);
-                        if (quotedParamEnd > quotedParamStart) {
-                            String potentialParam = details.substring(quotedParamStart + 1, quotedParamEnd);
-                            // Check if this is a parameter name or a full message
-                            if (!potentialParam.contains(" ")) { // Simple parameter name shouldn't contain spaces
-                                return potentialParam;
-                            } else if (potentialParam.contains("\" is not allowed")) {
-                                return potentialParam.substring(0, potentialParam.indexOf("\" is not allowed"));
-                            }
+            // For other types, return as-is (likely text-only)
+            return multimodalContent;
+        } catch (Exception e) {
+            logger.warn("Error creating history-friendly multimodal content: {}", e.getMessage());
+            // Return text extraction as fallback
+            return extractTextFromMultimodalContent(multimodalContent);
+        }    }
+
+    /**
+     * Checks if the given content is a history-friendly (stripped) version of multimodal content.
+     * This helps determine whether to use the content as-is or restore full multimodal data.
+     * 
+     * @param content The content to check
+     * @return true if this appears to be stripped content for history
+     */
+    private boolean isHistoryFriendlyContent(Object content) {
+        if (content instanceof List) {
+            @SuppressWarnings("unchecked")
+            List<Object> contentList = (List<Object>) content;
+            
+            for (Object item : contentList) {
+                if (item instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> itemMap = (Map<String, Object>) item;
+                    Object text = itemMap.get("text");
+                    if (text instanceof String) {
+                        String textStr = (String) text;
+                        if (textStr.contains("[Image content omitted") || 
+                            textStr.contains("[Multimodal content omitted")) {
+                            return true;
                         }
                     }
                 }
             }
-        } catch (Exception e) {
-            logger.debug("Error extracting parameter name from error message: {}", e.getMessage());
         }
-        
-        return null;
+        return false;
     }
-
-    // ...existing code...
 }

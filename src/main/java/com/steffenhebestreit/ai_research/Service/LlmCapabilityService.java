@@ -129,4 +129,23 @@ public class LlmCapabilityService {
         
         return config;
     }
+    
+    /**
+     * Gets the current default model ID.
+     * 
+     * @return The default model ID from configuration
+     */
+    public String getDefaultModelId() {
+        return defaultModelId;
+    }
+    
+    /**
+     * Checks if a model exists in the configuration.
+     * 
+     * @param modelId The model ID to check
+     * @return true if the model exists, false otherwise
+     */
+    public boolean modelExists(String modelId) {
+        return getLlmConfiguration(modelId) != null;
+    }
 }
