@@ -114,14 +114,19 @@ public class ChatService {
                         sameContent = true;
                         duplicateReason = "exact content match";
                     }
-                    
-                    // Check for substring match (for handling truncated responses)
+                      // Check for substring match (for handling truncated responses)
                     // Only for agent/assistant responses which might be saved twice
+                    // Be more lenient to avoid blocking legitimate responses
                     else if (("agent".equals(message.getRole()) || "assistant".equals(message.getRole())) &&
-                            existingContent.length() > 20 && newContent.length() > 20) {
-                        if (existingContent.contains(newContent) || newContent.contains(existingContent)) {
+                            existingContent.length() > 50 && newContent.length() > 50) {
+                        // Only consider it a duplicate if one is clearly a substring of the other
+                        // AND they share a significant amount of content (at least 80% overlap)
+                        if (existingContent.contains(newContent) && newContent.length() > existingContent.length() * 0.8) {
                             sameContent = true;
-                            duplicateReason = "content substring match";
+                            duplicateReason = "content is substantial subset of existing";
+                        } else if (newContent.contains(existingContent) && existingContent.length() > newContent.length() * 0.8) {
+                            sameContent = true;
+                            duplicateReason = "existing content is substantial subset";
                         }
                     }
                 }
