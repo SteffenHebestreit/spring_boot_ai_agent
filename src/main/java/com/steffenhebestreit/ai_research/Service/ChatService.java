@@ -6,7 +6,6 @@ import com.steffenhebestreit.ai_research.Model.Message;
 import com.steffenhebestreit.ai_research.Repository.ChatMessageRepository;
 import com.steffenhebestreit.ai_research.Repository.ChatRepository;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;

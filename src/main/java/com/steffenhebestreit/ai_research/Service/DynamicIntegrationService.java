@@ -271,7 +271,6 @@ public class DynamicIntegrationService {
             HttpEntity<Void> getReq = new HttpEntity<>(getHeaders);
 
             try {
-                @SuppressWarnings("unchecked")
                 ResponseEntity<List> resp = restTemplate.exchange(
                     toolsUrl, HttpMethod.GET, getReq, List.class);
                 List<Map<String, Object>> tools = resp.getBody();

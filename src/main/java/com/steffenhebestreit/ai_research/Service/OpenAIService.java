@@ -1691,8 +1691,7 @@ private ProviderModel createProviderModel(String id, JsonNode modelNode) {
      * 
      * @param id The model ID
      * @return True if the model likely supports vision, false otherwise
-     */
-    private boolean detectVisionCapability(String id) {
+     */    private boolean detectVisionCapability(String id) {
         String lowerCaseId = id.toLowerCase();
         
         // Known vision-capable models
@@ -1704,7 +1703,13 @@ private ProviderModel createProviderModel(String id, JsonNode modelNode) {
            lowerCaseId.equals("claude-3-sonnet") || 
            lowerCaseId.equals("claude-3-haiku") || 
            lowerCaseId.contains("gemini-pro-vision") || 
-           lowerCaseId.contains("gemini-1.5");
+           lowerCaseId.contains("gemini-1.5") ||
+           lowerCaseId.contains("gemma-3") ||  // Gemma models support vision
+           lowerCaseId.contains("medgemma-4b") ||  // MedGemma models support vision
+           lowerCaseId.contains("llava") ||  // LLaVA models are vision-capable
+           lowerCaseId.contains("bakllava") || // BakLLaVA variants
+           lowerCaseId.contains("moondream") || // Moondream vision models
+           lowerCaseId.contains("cogvlm");   // CogVLM models
     }
       /**
      * Detects if a model likely supports tool calling based on its ID.

@@ -111,4 +111,108 @@ public class ProviderModelAdapter {
             model.setFunctionCallingEnabled(supportsTools);
         }
     }
+    
+    /**
+     * Get the token limit for the model
+     * 
+     * @param model The model to query
+     * @return The token limit
+     */
+    public static Integer getTokenLimit(ProviderModel model) {
+        if (model != null) {
+            return model.getMaxContextTokens();
+        }
+        return null;
+    }
+    
+    /**
+     * Get whether the model supports text input
+     * 
+     * @param model The model to query
+     * @return Whether the model supports text (always true)
+     */
+    public static boolean isSupportsText(ProviderModel model) {
+        return true; // All models support text
+    }
+      /**
+     * Get whether the model supports image input
+     * 
+     * @param model The model to query
+     * @return Whether the model supports images
+     */
+    public static boolean isSupportsImage(ProviderModel model) {
+        if (model != null && model.getVisionEnabled() != null) {
+            return model.getVisionEnabled();
+        }
+        
+        // If provider doesn't specify, try to detect from model ID
+        if (model != null && model.getId() != null) {
+            return detectVisionCapabilityFromId(model.getId());
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Detects if a model likely supports vision capabilities based on its ID.
+     * 
+     * @param id The model ID
+     * @return True if the model likely supports vision, false otherwise
+     */
+    private static boolean detectVisionCapabilityFromId(String id) {
+        String lowerCaseId = id.toLowerCase();
+        
+        // Known vision-capable models
+        return lowerCaseId.contains("vision") || 
+           lowerCaseId.contains("-v") || 
+           lowerCaseId.equals("gpt-4-turbo") || 
+           lowerCaseId.contains("gpt-4o") || 
+           lowerCaseId.equals("claude-3-opus") || 
+           lowerCaseId.equals("claude-3-sonnet") || 
+           lowerCaseId.equals("claude-3-haiku") || 
+           lowerCaseId.contains("gemini-pro-vision") || 
+           lowerCaseId.contains("gemini-1.5") ||
+           lowerCaseId.contains("gemma") ||  // Gemma models support vision
+           lowerCaseId.contains("llava") ||  // LLaVA models are vision-capable
+           lowerCaseId.contains("bakllava") || // BakLLaVA variants
+           lowerCaseId.contains("moondream") || // Moondream vision models
+           lowerCaseId.contains("cogvlm");   // CogVLM models
+    }
+    
+    /**
+     * Get whether the model supports PDF input
+     * 
+     * @param model The model to query
+     * @return Whether the model supports PDFs (assumes same as image support)
+     */
+    public static boolean isSupportsPdf(ProviderModel model) {
+        // For now, assume PDF support matches image support
+        return isSupportsImage(model);
+    }
+    
+    /**
+     * Get whether the model supports JSON output
+     * 
+     * @param model The model to query
+     * @return Whether the model supports JSON
+     */
+    public static boolean isSupportsJson(ProviderModel model) {
+        if (model != null && model.getJsonModeEnabled() != null) {
+            return model.getJsonModeEnabled();
+        }
+        return false;
+    }
+    
+    /**
+     * Get whether the model supports tools/functions
+     * 
+     * @param model The model to query
+     * @return Whether the model supports tools
+     */
+    public static boolean isSupportsTools(ProviderModel model) {
+        if (model != null && model.getFunctionCallingEnabled() != null) {
+            return model.getFunctionCallingEnabled();
+        }
+        return false;
+    }
 }

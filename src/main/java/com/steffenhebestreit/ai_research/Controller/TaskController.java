@@ -146,17 +146,22 @@ public class TaskController {
      * <ol>
      * <li>Creates new chat with user message</li>
      * <li>Generates AI response via OpenAI service</li>
-     * <li>Saves AI response to chat history</li>
-     * <li>Returns complete AI response</li>
+     * <li>Saves AI response to chat history</li>     * <li>Returns complete AI response</li>
      * </ol>
      * 
      * @param userMessage The user's input message as plain text
+     * @param llmId Optional ID of the specific LLM to use.
+     *              If not provided, uses the default configured LLM.
      * @return ResponseEntity containing the AI's response text
      * @throws IllegalArgumentException if userMessage is null or empty
-     * @see #chatStream(String) for streaming alternative
+     * @see #chatStream(String, String) for streaming alternative
      */    @PostMapping(value = "/chat", consumes = MediaType.TEXT_PLAIN_VALUE, produces = MediaType.TEXT_PLAIN_VALUE)
-    public ResponseEntity<String> chat(@RequestBody String userMessage) {
-        try {
+    public ResponseEntity<String> chat(
+            @RequestBody String userMessage,
+            @RequestParam(value = "llmId", required = false) String llmId) {        try {
+            // Use provided LLM ID or fall back to default
+            String modelId = (llmId != null && !llmId.isEmpty()) ? llmId : defaultLlmId;
+            
             // Create a new chat with the user message
             Message userMsg = new Message("user", "text/plain", userMessage);
             Chat chat = chatService.createChat(userMsg);
@@ -175,7 +180,7 @@ public class TaskController {
                     -1  // Convert ALL messages to text-only
                 );
                 
-                // Use optimized history for AI request
+                // Use optimized history for AI request with selected model
                 String aiResponse = openAIService.getChatCompletion(
                     optimizedHistory.stream()
                         .map(msg -> {
@@ -185,7 +190,7 @@ public class TaskController {
                             return new ChatMessage(msg.getRole(), content);
                         })
                         .toList(),
-                    defaultLlmId
+                    modelId
                 );
                 
                 // Add the AI response to the chat history
@@ -194,8 +199,8 @@ public class TaskController {
                 
                 return ResponseEntity.ok(aiResponse);
             } else {
-                // Regular text-only processing
-                String aiResponse = openAIService.getChatCompletion(userMessage);
+                // Regular text-only processing with selected model
+                String aiResponse = openAIService.getChatCompletion(userMessage, modelId);
                 
                 // Add the AI response to the chat history
                 Message agentMsg = new Message("agent", "text/plain", aiResponse);
@@ -229,19 +234,25 @@ public class TaskController {
      * <li>Input validation errors return error flux</li>
      * <li>Stream processing errors are logged and replaced with user-friendly messages</li>
      * <li>Persistence errors during completion are logged but don't interrupt the stream</li>
-     * </ul>
-     * 
+     * </ul>     * 
      * @param userMessage The user's input message as plain text
+     * @param llmId Optional ID of the specific LLM to use.
+     *              If not provided, uses the default configured LLM.
      * @return Flux&lt;String&gt; streaming AI response chunks
      * @throws IllegalArgumentException if userMessage is null or empty
-     * @see #chat(String) for synchronous alternative
+     * @see #chat(String, String) for synchronous alternative
      */
     @PostMapping(value = "/chat-stream", consumes = MediaType.TEXT_PLAIN_VALUE, produces = MediaType.APPLICATION_NDJSON_VALUE)
-    public Flux<String> chatStream(@RequestBody String userMessage) {
+    public Flux<String> chatStream(
+            @RequestBody String userMessage,
+            @RequestParam(value = "llmId", required = false) String llmId) {
         if (userMessage == null || userMessage.trim().isEmpty()) {
             return Flux.error(new IllegalArgumentException("User message cannot be empty"));
-        }
-        try {            // Create a new chat with the user message
+        }        try {
+            // Use provided LLM ID or fall back to default
+            String modelId = (llmId != null && !llmId.isEmpty()) ? llmId : defaultLlmId;
+            
+            // Create a new chat with the user message
             Message userMsg = new Message("user", "text/plain", userMessage);
             Chat chat = chatService.createChat(userMsg);
             
@@ -275,8 +286,8 @@ public class TaskController {
             // StringBuilder to accumulate the response
             StringBuilder responseAggregator = new StringBuilder();
             
-            // Get and return the streaming response
-            return openAIService.getChatCompletionStreamWithToolExecution(conversationHistory, defaultLlmId)
+            // Get and return the streaming response with selected model
+            return openAIService.getChatCompletionStreamWithToolExecution(conversationHistory, modelId)
                     .doOnNext(responseAggregator::append) // Append each chunk to the aggregator
                     .doOnComplete(() -> {
                         // Save the completed response to chat history
