@@ -503,14 +503,23 @@ public class MultimodalContentService {
             result.put("error", "File data is incomplete or not provided");
             return result;
         }
-        
-        String base64Content = (String) fileData.get("file");
+          String base64Content = (String) fileData.get("file");
         String contentType = (String) fileData.get("fileType");
         String fileName = (String) fileData.get("fileName");
         Number fileSize = (Number) fileData.get("fileSize");
         
         if (base64Content == null || base64Content.isEmpty()) {
             result.put("error", "File content is empty or not provided");
+            return result;
+        }
+          // Validate Base64 content early
+        try {
+            logger.debug("Validating Base64 content for file: {}, original length: {}", fileName, base64Content.length());
+            base64Content = validateAndFixBase64Padding(base64Content);
+            logger.debug("Base64 validation successful, final length: {}", base64Content.length());
+        } catch (IllegalArgumentException e) {
+            logger.error("Base64 validation failed for file '{}': {}", fileName, e.getMessage());
+            result.put("error", "Invalid Base64 file content: " + e.getMessage());
             return result;
         }
         
@@ -623,11 +632,19 @@ public class MultimodalContentService {
         if (!(boolean)validation.get("valid")) {
             throw new IllegalArgumentException((String)validation.get("error"));
         }
-        
-        String base64Content = (String) fileData.get("file");
+          String base64Content = (String) fileData.get("file");
         String contentType = (String) fileData.get("fileType");
         String fileName = (String) fileData.get("fileName");
         String prompt = (String) fileData.get("prompt");
+          // Validate and fix Base64 padding
+        try {
+            logger.debug("Validating Base64 content for multimodal creation: {}, original length: {}", fileName, base64Content.length());
+            base64Content = validateAndFixBase64Padding(base64Content);
+            logger.debug("Base64 validation successful for multimodal creation, final length: {}", base64Content.length());
+        } catch (IllegalArgumentException e) {
+            logger.error("Base64 validation failed for multimodal creation '{}': {}", fileName, e.getMessage());
+            throw new IllegalArgumentException("Invalid Base64 file content: " + e.getMessage());
+        }
         
         if (contentType == null) {
             contentType = "application/octet-stream";
@@ -758,5 +775,49 @@ public class MultimodalContentService {
         fileData.put("fileSize", fileSize);
         fileData.put("prompt", prompt);
         return fileData;
+    }
+
+    /**
+     * Validates and fixes Base64 content padding if necessary.
+     * <p>
+     * Base64 strings must be properly padded with '=' characters to be valid.
+     * This method checks if the Base64 string is valid and adds padding if needed.
+     * 
+     * @param base64Content The Base64 content to validate and fix
+     * @return A properly padded and validated Base64 string
+     * @throws IllegalArgumentException if the content is not valid Base64
+     */
+    private String validateAndFixBase64Padding(String base64Content) {
+        if (base64Content == null || base64Content.isEmpty()) {
+            throw new IllegalArgumentException("Base64 content cannot be null or empty");
+        }
+        
+        // Remove any whitespace or newlines
+        String cleanBase64 = base64Content.replaceAll("\\s", "");
+        
+        // Check if it contains only valid Base64 characters
+        if (!cleanBase64.matches("^[A-Za-z0-9+/]*={0,2}$")) {
+            throw new IllegalArgumentException("Invalid Base64 characters found");
+        }
+        
+        // Add padding if necessary
+        int padding = cleanBase64.length() % 4;
+        if (padding != 0) {
+            int paddingToAdd = 4 - padding;
+            StringBuilder sb = new StringBuilder(cleanBase64);
+            for (int i = 0; i < paddingToAdd; i++) {
+                sb.append('=');
+            }
+            cleanBase64 = sb.toString();
+        }
+        
+        // Validate that the padded string can be decoded
+        try {
+            Base64.getDecoder().decode(cleanBase64);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Invalid Base64 content: " + e.getMessage());
+        }
+        
+        return cleanBase64;
     }
 }
