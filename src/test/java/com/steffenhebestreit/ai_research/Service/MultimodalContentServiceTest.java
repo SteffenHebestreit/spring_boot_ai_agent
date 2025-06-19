@@ -78,9 +78,7 @@ public class MultimodalContentServiceTest {
         // Then
         assertTrue((Boolean) result.get("valid"));
         assertNull(result.get("error"));
-    }
-
-    @Test
+    }    @Test
     void validateFile_WithImageAndTextOnlyModel_ShouldReturnInvalid() {
         // Given
         byte[] imageContent = new byte[1024]; // 1KB sample image
@@ -88,16 +86,20 @@ public class MultimodalContentServiceTest {
             "image", "test.jpg", "image/jpeg", imageContent
         );
         
-        when(llmCapabilityService.getLlmConfiguration("gpt-3.5-turbo")).thenReturn(textOnlyModel);
+        // Use a model name that won't match any pattern in isLikelyVisionCapableModel
+        textOnlyModel.setId("text-only-model");
+        textOnlyModel.setName("Text Only Model");
+        
+        when(llmCapabilityService.getLlmConfigurationMerged("text-only-model")).thenReturn(textOnlyModel);
         
         // When
-        Map<String, Object> result = multimodalContentService.validateFile(imageFile, "gpt-3.5-turbo");
+        Map<String, Object> result = multimodalContentService.validateFile(imageFile, "text-only-model");
         
         // Then
         assertFalse((Boolean) result.get("valid"));
         assertNotNull(result.get("error"));
         assertTrue(((String) result.get("error")).contains("not support image"));
-    }    @Test
+    }@Test
     void validateFile_WithPdfAndFullCapabilityModel_ShouldReturnValid() {
         // Given
         byte[] pdfContent = new byte[1024]; // 1KB sample PDF

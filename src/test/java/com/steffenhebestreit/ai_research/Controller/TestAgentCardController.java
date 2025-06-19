@@ -2,9 +2,7 @@ package com.steffenhebestreit.ai_research.Controller;
 
 import com.steffenhebestreit.ai_research.Model.AgentCard;
 import com.steffenhebestreit.ai_research.Model.AgentProvider;
-import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
 
 import java.io.IOException;
 

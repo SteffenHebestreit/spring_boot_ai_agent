@@ -113,38 +113,17 @@ public class LlmController {
      * @return ResponseEntity containing list of LLM configurations with capability details
      * @see LlmConfiguration
      * @see LlmCapabilityService#getAllLlmConfigurations()
-     */
-    @GetMapping("/capabilities")
+     */    @GetMapping("/capabilities")
     public ResponseEntity<List<LlmConfiguration>> getLlmCapabilities() {
-        List<LlmConfiguration> localConfigurations = llmCapabilityService.getAllLlmConfigurations();
-        List<com.steffenhebestreit.ai_research.Model.ProviderModel> providerModels = openAIService.getAvailableModels();
-        List<LlmConfiguration> providerConfigurations = convertToCapabilitiesFormat(providerModels);
-
-        // Combine local and provider configurations, prioritizing local ones in case of ID collision
-        Map<String, LlmConfiguration> combinedConfigMap = new HashMap<>();
-
-        // Add all local configurations first
-        for (LlmConfiguration config : localConfigurations) {
-            if (config != null && config.getId() != null) {
-                combinedConfigMap.put(config.getId(), config);
-            }
-        }
-
-        // Add provider configurations, only if an ID doesn't already exist from local configs
-        for (LlmConfiguration config : providerConfigurations) {
-            if (config != null && config.getId() != null) {
-                combinedConfigMap.putIfAbsent(config.getId(), config);
-            }
-        }
-
-        List<LlmConfiguration> combinedConfigurations = new ArrayList<>(combinedConfigMap.values());
+        List<LlmConfiguration> mergedConfigurations = llmCapabilityService.getMergedLlmConfigurations();
         
-        if (combinedConfigurations.isEmpty()) {
+        if (mergedConfigurations.isEmpty()) {
             logger.warn("No LLM configurations found from local or provider sources.");
             return ResponseEntity.ok(Collections.emptyList());
         }
         
-        return ResponseEntity.ok(combinedConfigurations);
+        logger.info("Returning {} merged LLM configurations", mergedConfigurations.size());
+        return ResponseEntity.ok(mergedConfigurations);
     }
       /**
      * Retrieves the default LLM configuration as specified in application properties.
@@ -552,8 +531,7 @@ public class LlmController {
         
         return results;
     }
-    
-    /**
+      /**
      * Converts a list of ProviderModel objects to LlmConfiguration format.
      * 
      * <p>This method transforms provider-specific model information into the standardized
@@ -574,24 +552,25 @@ public class LlmController {
             config.setName(model.getName() != null ? model.getName() : model.getId());
             config.setDescription(model.getDescription());
             
-            // Set capabilities based on provider model flags
+            // Set capabilities based on provider model flags - these should override local settings
             config.setSupportsText(true); // All models support text by default
             config.setSupportsImage(Boolean.TRUE.equals(model.getVisionEnabled()));
             config.setSupportsFunctionCalling(Boolean.TRUE.equals(model.getFunctionCallingEnabled()));
             config.setSupportsJsonMode(Boolean.TRUE.equals(model.getJsonModeEnabled()));
             
-            // PDF support is not directly indicated by provider models, so we'll set to false
-            config.setSupportsPdf(false);
+            // PDF support is not directly indicated by provider models, but we can infer from vision capabilities
+            // This will be properly merged with local config if available
+            config.setSupportsPdf(Boolean.TRUE.equals(model.getVisionEnabled()));
             
-            // Set token limits if available
-            if (model.getMaxContextTokens() != null) {
+            // Set token limits if available from provider
+            if (model.getMaxContextTokens() != null && model.getMaxContextTokens() > 0) {
                 config.setMaxContextTokens(model.getMaxContextTokens());
             }
-            if (model.getMaxOutputTokens() != null) {
+            if (model.getMaxOutputTokens() != null && model.getMaxOutputTokens() > 0) {
                 config.setMaxOutputTokens(model.getMaxOutputTokens());
             }
             
-            // Set notes with provider information
+            // Set notes with provider information - this shows the model came from provider
             StringBuilder notes = new StringBuilder();
             if (model.getOwnedBy() != null) {
                 notes.append("Provider: ").append(model.getOwnedBy());
@@ -602,13 +581,16 @@ public class LlmController {
                 }
                 notes.append("Capabilities: ").append(model.getCapabilities());
             }
+            // Add indicator that this came from provider API
             if (notes.length() > 0) {
-                config.setNotes(notes.toString());
+                notes.append(" [From Provider API]");
+            } else {
+                notes.append("[From Provider API]");
             }
+            config.setNotes(notes.toString());
             
             configurations.add(config);
         }
-        
-        return configurations;
+          return configurations;
     }
 }
