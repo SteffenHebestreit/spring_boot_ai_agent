@@ -34,6 +34,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 /**
  * Service for interacting with OpenAI-compatible LLM APIs, including multimodal content processing.
@@ -256,8 +258,12 @@ public class OpenAIService {
                         role = "assistant";
                         logger.debug("Mapped 'agent' role to 'assistant' for LLM API compatibility");
                     }
+                      llmMessage.put("role", role);
                     
-                    llmMessage.put("role", role);                    // Content is nullable, especially for assistant messages with tool_calls
+                    // Add timestamp information to the message content
+                    String timestampPrefix = getTimestampPrefix(msg);
+                    
+                    // Content is nullable, especially for assistant messages with tool_calls
                     if (msg.getContent() != null) {                        // Handle multimodal content specifically
                         if ("multipart/mixed".equals(msg.getContentType())) {
                             try {
@@ -267,18 +273,18 @@ public class OpenAIService {
                                 // Check if this looks like a history message with stripped content
                                 if (isHistoryFriendlyContent(parsedContent)) {
                                     // This is already a history message with stripped images - keep as-is
-                                    llmMessage.put("content", parsedContent);
+                                    llmMessage.put("content", addTimestampToMultimodalContent(parsedContent, timestampPrefix));
                                     logger.debug("Using pre-existing history-friendly multimodal content for role: {}", role);
                                 } else {
                                     // This is a message with full multimodal content
                                     if (isCurrentMessage) {
                                         // Current/new message - keep full multimodal content with images
-                                        llmMessage.put("content", parsedContent);
+                                        llmMessage.put("content", addTimestampToMultimodalContent(parsedContent, timestampPrefix));
                                         logger.debug("Using full multimodal content for current message with role: {}", role);
                                     } else {
                                         // Historical message - convert to history-friendly for token efficiency
                                         Object historyFriendlyContent = createHistoryFriendlyMultimodalContent(parsedContent);
-                                        llmMessage.put("content", historyFriendlyContent);
+                                        llmMessage.put("content", addTimestampToMultimodalContent(historyFriendlyContent, timestampPrefix));
                                         logger.debug("Converted full multimodal content to history-friendly format for historical message with role: {}", role);
                                     }
                                 }
@@ -287,17 +293,17 @@ public class OpenAIService {
                                 String content = msg.getContent();
                                 if (content.contains("[Image content omitted") || content.contains("[Multimodal content")) {
                                     // This looks like a stripped text representation
-                                    llmMessage.put("content", content);
+                                    llmMessage.put("content", timestampPrefix + content);
                                     logger.debug("Using text representation of multimodal content for history message");
                                 } else {
                                     // If parsing fails, fall back to using the string directly
                                     logger.warn("Failed to parse multimodal content JSON, using raw string: {}", e.getMessage());
-                                    llmMessage.put("content", content);
+                                    llmMessage.put("content", timestampPrefix + content);
                                 }
                             }
                         } else {
-                            // Regular text content
-                            llmMessage.put("content", msg.getContent());
+                            // Regular text content - add timestamp prefix
+                            llmMessage.put("content", timestampPrefix + msg.getContent());
                         }
                     } else {
                         // If content is null, explicitly put null, unless it's an assistant message
@@ -339,9 +345,10 @@ public class OpenAIService {
     public Flux<String> getChatCompletionStream(List<ChatMessage> conversationMessages) {
         return getChatCompletionStream(conversationMessages, openAIProperties.getModel());
     }
-    
-    public Flux<String> getChatCompletionStream(List<ChatMessage> conversationMessages, String modelId) {
-        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(conversationMessages); // Uses updated method
+      public Flux<String> getChatCompletionStream(List<ChatMessage> conversationMessages, String modelId) {
+        // Ensure system message with time is included
+        List<ChatMessage> messagesWithSystem = prepareConversationWithSystemMessage(conversationMessages);
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messagesWithSystem); // Uses updated method
 
         if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && (conversationMessages == null || conversationMessages.isEmpty()))) {
             logger.warn("Conversation messages list is effectively empty. Cannot make request to LLM.");
@@ -879,12 +886,12 @@ public class OpenAIService {
             String modelId,
             FluxSink<String> sink,
             ToolSelectionRequest toolSelection,
-            AtomicBoolean cancellationFlag) {
-
-        final AtomicBoolean sinkClosed = new AtomicBoolean(false);
+            AtomicBoolean cancellationFlag) {        final AtomicBoolean sinkClosed = new AtomicBoolean(false);
+        // Ensure system message with time is included
+        List<ChatMessage> messagesWithSystem = prepareConversationWithSystemMessage(originalMessages);
         // Create a mutable copy of messages that can be modified
         // Use an AtomicReference to hold our messages list so we can modify it safely from lambdas
-        final AtomicReference<List<ChatMessage>> messagesRef = new AtomicReference<>(new ArrayList<>(originalMessages));
+        final AtomicReference<List<ChatMessage>> messagesRef = new AtomicReference<>(new ArrayList<>(messagesWithSystem));
 
         if (cancellationFlag.get()) {
             tryCloseSinkWithError(sink, sinkClosed, new CancellationException("Stream cancelled by client before start."), modelId, cancellationFlag);
@@ -1558,7 +1565,7 @@ private ProviderModel createProviderModel(String id, JsonNode modelNode) {
     
     // Set provider name (extract from ID or use default)
     String provider = determineProviderFromId(id);
-    ProviderModelAdapter.setProvider(model, provider);
+       ProviderModelAdapter.setProvider(model, provider);
     
     // Check for capabilities in LlmCapabilityService
     LlmConfiguration llmConfig = llmCapabilityService.getLlmConfiguration(id);
@@ -1823,11 +1830,12 @@ private ProviderModel createProviderModel(String id, JsonNode modelNode) {
      * @param messages The list of chat messages representing the conversation history
      * @param modelId The ID of the LLM model to use
      * @return The LLM's response as text
-     */
-    public String getChatCompletion(List<ChatMessage> messages, String modelId) {
+     */    public String getChatCompletion(List<ChatMessage> messages, String modelId) {
         logger.info("Getting completion for model: {}", modelId);
         
-        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messages);
+        // Ensure system message with time is included
+        List<ChatMessage> messagesWithSystem = prepareConversationWithSystemMessage(messages);
+        List<Map<String, Object>> messagesForLlm = prepareMessagesForLlm(messagesWithSystem);
         
         if (messagesForLlm.isEmpty() || (messagesForLlm.size() == 1 && "system".equals(messagesForLlm.get(0).get("role")) && messages.isEmpty())) {
             logger.warn("Cannot send an effectively empty message list to LLM.");
@@ -1901,15 +1909,15 @@ private ProviderModel createProviderModel(String id, JsonNode modelNode) {
      * @param message The text message to send to the LLM
      * @param modelId The ID of the model to use for generating the completion
      * @return The complete text response from the LLM
-     */
-    public String getChatCompletion(String message, String modelId) {
+     */    public String getChatCompletion(String message, String modelId) {
         logger.info("Getting chat completion with model: {}", modelId);
         
         List<ChatMessage> messages = new ArrayList<>();
         
-        // Add system message if available
-        if (openAIProperties.getSystemRole() != null && !openAIProperties.getSystemRole().isEmpty()) {
-            messages.add(new ChatMessage("system", "text/plain", openAIProperties.getSystemRole()));
+        // Add system message with time if available
+        ChatMessage systemMessage = createSystemMessageWithTime();
+        if (systemMessage != null) {
+            messages.add(systemMessage);
         }
         
         // Add user message
@@ -2133,5 +2141,111 @@ private ProviderModel createProviderModel(String id, JsonNode modelNode) {
             }
         }
         return false;
+    }    /**
+     * Creates a timestamp prefix for messages to provide temporal context.
+     * 
+     * @param msg The chat message to create a timestamp prefix for
+     * @return A formatted timestamp prefix string
+     */
+    private String getTimestampPrefix(ChatMessage msg) {
+        if (msg.getCreatedAt() != null) {
+            LocalDateTime messageTime = LocalDateTime.ofInstant(msg.getCreatedAt(), java.time.ZoneId.systemDefault());
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            return "[" + messageTime.format(formatter) + "] ";
+        } else {
+            // Fallback for messages without timestamps
+            return "[timestamp unavailable] ";
+        }
     }
+    
+    /**
+     * Adds timestamp information to multimodal content.
+     * For multimodal content (arrays), this method adds the timestamp to the first text element.
+     * 
+     * @param content The multimodal content object
+     * @param timestampPrefix The timestamp prefix to add
+     * @return The modified content with timestamp information
+     */
+    private Object addTimestampToMultimodalContent(Object content, String timestampPrefix) {
+        if (content instanceof List) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> contentList = (List<Map<String, Object>>) content;
+            
+            // Create a new list to avoid modifying the original
+            List<Map<String, Object>> modifiedList = new ArrayList<>();
+            
+            boolean timestampAdded = false;
+            for (Map<String, Object> contentItem : contentList) {
+                Map<String, Object> modifiedItem = new HashMap<>(contentItem);
+                
+                // Add timestamp to the first text content item
+                if (!timestampAdded && "text".equals(contentItem.get("type"))) {
+                    String originalText = (String) contentItem.get("text");
+                    if (originalText != null) {
+                        modifiedItem.put("text", timestampPrefix + originalText);
+                        timestampAdded = true;
+                    }
+                }
+                
+                modifiedList.add(modifiedItem);
+            }
+            
+            // If no text content was found, add a timestamp-only text element at the beginning
+            if (!timestampAdded && !contentList.isEmpty()) {
+                Map<String, Object> timestampItem = new HashMap<>();
+                timestampItem.put("type", "text");
+                timestampItem.put("text", timestampPrefix.trim());
+                modifiedList.add(0, timestampItem);
+            }
+            
+            return modifiedList;
+        } else {
+            // For non-list content, return as-is (shouldn't happen for multimodal)
+            return content;
+        }
+    }
+
+    /**
+     * Creates a system message with the current date and time appended.
+     * 
+     * @return A ChatMessage with system role and time-appended system role content
+     */
+    private ChatMessage createSystemMessageWithTime() {
+        if (openAIProperties.getSystemRole() != null && !openAIProperties.getSystemRole().isEmpty()) {
+            // Format current date and time in a human-readable format
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            String formattedDateTime = now.format(formatter);
+            
+            String systemRoleWithTime = openAIProperties.getSystemRole() + " Current date and time: " + formattedDateTime + ".";
+            return new ChatMessage("system", "text/plain", systemRoleWithTime);
+        }
+        return null;
+    }
+
+    /**
+     * Prepares a list of messages for LLM by ensuring system message with time is prepended.
+     * 
+     * @param messages The conversation messages
+     * @return A new list with system message prepended if needed
+     */
+    private List<ChatMessage> prepareConversationWithSystemMessage(List<ChatMessage> messages) {
+        List<ChatMessage> result = new ArrayList<>();
+        
+        // Add system message with time if available and not already present
+        ChatMessage systemMessage = createSystemMessageWithTime();
+        if (systemMessage != null) {
+            // Check if first message is already a system message
+            boolean hasSystemMessage = !messages.isEmpty() && "system".equals(messages.get(0).getRole());
+            if (!hasSystemMessage) {
+                result.add(systemMessage);
+            }
+        }
+        
+        // Add all original messages
+        result.addAll(messages);
+        
+        return result;
+    }
+
 }

@@ -6,12 +6,14 @@ A comprehensive Spring Boot application providing advanced AI research capabilit
 
 ### Core Capabilities
 - **Chat Management**: Persistent chat sessions with message history and real-time streaming responses
+- **Timestamped Messages**: All messages include formatted timestamps for better temporal context and traceability
 - **Multimodal Content**: Full support for text, images, and PDF processing with vision-enabled LLMs
 - **Dynamic Tool Integration**: Runtime tool discovery and execution via MCP-compliant servers
 - **Task Management**: Research task creation, progress tracking, and artifact management
 - **Agent Discovery**: Standards-compliant agent card for automatic discoverability
 
 ### Advanced Features
+- **Message Timestamps**: Automatic timestamp inclusion in all LLM communications for enhanced temporal tracking
 - **Tool Selection**: Frontend-controlled tool selection for fine-grained request customization
 - **Real-time Streaming**: Server-sent events with tool execution feedback
 - **Raw Content Storage**: Dual-storage system preserving both filtered and unfiltered LLM output
@@ -93,8 +95,8 @@ integration.mcp-servers[0].auth.type=bearer
 ### Chat Management
 - `GET /api/chats` - List all chats
 - `POST /api/chats` - Create new chat
-- `POST /api/chats/{id}/message/stream` - Stream AI response
-- `GET /api/chats/{id}/messages` - Get chat history
+- `POST /api/chats/{id}/message/stream` - Stream AI response (includes automatic timestamping)
+- `GET /api/chats/{id}/messages` - Get chat history with timestamps
 
 ### Multimodal Content
 - `POST /api/multimodal/upload` - Upload files (images, PDFs)
@@ -137,7 +139,7 @@ The application follows a layered architecture:
 ### Key Components
 
 - **ChatService**: Manages chat sessions and message persistence
-- **OpenAIService**: LLM integration with streaming and tool support
+- **OpenAIService**: LLM integration with streaming, tool support, and automatic message timestamping
 - **DynamicIntegrationService**: MCP server discovery and tool execution
 - **TaskService**: Research task management with real-time updates
 - **MultimodalContentService**: File processing for images and PDFs
